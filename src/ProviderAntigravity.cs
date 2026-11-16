@@ -167,7 +167,9 @@ namespace AIMeter
             req.ContentType = "application/json";
             req.Accept = "application/json";
             req.Headers["Authorization"] = "Bearer " + token;
-            req.UserAgent = "antigravity/cli ai-meter/" + Controller.Version;
+            // daily-cloudcode-pa returns the Gemini and Argon groups only for a recent Antigravity client version in the
+            // User-Agent; older or unknown values get just "Claude and GPT models". The version value is what matters.
+            req.UserAgent = "antigravity/hub/2.24.0 (aidev_client; os_type=windows; arch=amd64; cl=963137146)";
             req.Timeout = 15000;
             req.ReadWriteTimeout = 15000;
             var bytes = Encoding.UTF8.GetBytes(body);
