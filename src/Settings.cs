@@ -22,6 +22,7 @@ namespace AIMeter
         public bool OpenAIShowChat { get; set; }
         public bool CopilotEnabled { get; set; }
         public bool AntigravityEnabled { get; set; } // Google Antigravity quotas using the CLI's authentication.
+        public bool GrokEnabled { get; set; }       // Grok weekly credits using the Grok CLI's authentication.
         /// <summary>Definition-based services: id to enabled; missing entries follow local detection.</summary>
         public System.Collections.Generic.Dictionary<string, bool> Services { get; set; }
         public bool FindKeys { get; set; }          // Discover existing API keys in local apps on Windows and WSL.
