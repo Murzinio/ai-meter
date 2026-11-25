@@ -9,8 +9,8 @@
 // reach it, which is why the agent definitions also restrict what the agent may do.
 
 import { execFileSync } from "node:child_process";
-import { copyFileSync, lstatSync, mkdirSync, rmSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { copyFileSync, lstatSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { basename, dirname, join, resolve, win32 } from "node:path";
 
 function git(folder, ...args) {
   return gitWithInput(folder, null, ...args);
@@ -32,6 +32,34 @@ export function repositoryOf(workspace) {
   } catch {
     throw new Error("Delegation needs a Git repository, so that the agent sees only the files Git tracks: " + workspace + " is not in one.");
   }
+}
+
+/**
+ * Whether a path is inside WSL as Windows reaches it: \\wsl.localhost\<distro>\... or \\wsl$\<distro>\..., with either
+ * slash and in any case, also in the \\?\UNC\ form. A pure function of the text, so that it can be tested anywhere.
+ * The managed Pi works on Windows folders only, and the folder AI Meter is asked to describe is the plugin's snapshot or
+ * worktree (under the Windows profile), so the job's own workspace is what says where the repository is.
+ */
+export function isInsideWsl(path) {
+  return /^[\\/]{2}(\?[\\/]UNC[\\/])?wsl(\.localhost|\$)([\\/]|$)/i.test(String(path || ""));
+}
+
+/**
+ * Whether a workspace is inside WSL, judged on every spelling of it, so that how the caller wrote the path does not
+ * matter: as given, resolved against cwd ("." from a WSL share), its real path (realPath, which may give the share
+ * behind a mapped drive; a failure is ignored) and its repository's top folder (top, as Git reports it, which Git for
+ * Windows writes with forward slashes). Pure apart from what realPath reads.
+ */
+export function workspaceInsideWsl(workspace, { cwd = process.cwd(), realPath = realpathSync.native, top = null } = {}) {
+  // A Windows or UNC working folder is resolved the Windows way whatever system runs this, so that tests run anywhere.
+  const resolved = /^([A-Za-z]:|[\\/]{2})/.test(cwd) ? win32.resolve(cwd, workspace) : resolve(cwd, workspace);
+  let real = null;
+  try {
+    real = realPath(resolved);
+  } catch {
+    // A folder that cannot be resolved further is judged on its other spellings.
+  }
+  return [workspace, resolved, real, top].some(isInsideWsl);
 }
 
 /**

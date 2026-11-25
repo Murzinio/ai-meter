@@ -3,7 +3,9 @@
 // ("runtime@where"), the describe_dispatch errors by "runtime@where", the pools that refuse leases, the warnings,
 // the runtimes found and unsupported, the best-effort candidates (returned only with include_best_effort, counted
 // otherwise), the free-tier candidates (returned only with include_free_tier) and the budget a lease grants, the
-// tools it never answers (`silent`, as a relay that stays up but hangs), and how each fake agent behaves.
+// tools it never answers (`silent`, as a relay that stays up but hangs), and how each fake agent behaves. A describe
+// with managed: true is answered as AI Meter's managed Pi, on Windows or inside WSL (see managedDispatch for git_bash,
+// pi_config and the copy inside WSL); runtimes carries scenario.found, managed_runtimes and environment.
 
 import { appendFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -22,10 +24,18 @@ const tools = {
     ...(scenario.best_effort && !args.include_best_effort ? { best_effort_available: scenario.best_effort.length } : {}),
     pools: [],
     excluded: scenario.excluded || [],
-    runtimes: { found: [], unsupported: scenario.unsupported_runtimes || [], key_discovery: true },
+    runtimes: {
+      found: scenario.found || [],
+      unsupported: scenario.unsupported_runtimes || [],
+      key_discovery: true,
+      // ADR 0005: one entry per managed copy AI Meter offers, installed or not, and what the PC has.
+      ...(scenario.managed_runtimes ? { managed: scenario.managed_runtimes } : {}),
+      ...(scenario.environment ? { environment: scenario.environment } : {}),
+    },
   }),
   describe_dispatch: (args) => {
     if (readings-- > 0) return { error: "AI Meter is still reading the first data; try again in a few seconds." };
+    if (onlyManaged(args)) return { error: NO_OWN_PI };
     const error = (scenario.errors || {})[args.runtime + "@" + args.where];
     if (error) return { error };
     if ((scenario.unsupported || []).includes(args.runtime + "@" + args.where)) return { supported: false, reason: "not verified here", runtime: args.runtime, where: args.where };
@@ -45,9 +55,11 @@ const tools = {
       ...(args.distro ? { distro: args.distro } : {}),
       ...(scenario.warnings ? { warnings: scenario.warnings } : {}),
       ...(PLAN_AGENTS.includes(args.runtime) ? planDispatch(args) : {}),
+      ...(args.managed ? managedDispatch(args) : {}),
     };
   },
   claim_capacity: (args) => {
+    if (onlyManaged(args)) return { error: NO_OWN_PI };
     const onPlan = PLAN_AGENTS.includes(args.runtime);
     const pool = args.service + (onPlan ? ":plan" : ":free");
     if ((scenario.refuse || []).includes(pool)) return { refused: true, pool, headroom: { blocking: { reason: onPlan ? "plan_reserve" : "leased" } } };
@@ -59,6 +71,18 @@ const tools = {
   release_capacity: (args) => ({ lease_id: args.lease_id, released: true }),
   get_limits: (args) => ({ services: [{ service: args.service, read_at: "2026-11-02T14:00:00+01:00", limits: [{ name: "Session 5 h", kind: "5h", remaining_percent: 55, resets_at: "2026-11-02T15:00:00+01:00" }] }] }),
 };
+
+/**
+ * As the server does, a call without managed: true means the user's own agent: one that matches only a managed
+ * candidate (claim_capacity names no place, so any place matches) gets the server's error instead of the managed copy.
+ */
+const NO_OWN_PI = "No usable Pi is set up here for this service; AI Meter's managed Pi is used only when managed: true is passed.";
+function onlyManaged(args) {
+  if (args.managed === true) return false;
+  const same = (c) => c.service === args.service && c.model === args.model && c.runtime.name === args.runtime && (!args.where || c.runtime.where === args.where);
+  const all = [...(scenario.candidates || []), ...(scenario.free_tier || []), ...(scenario.best_effort || [])];
+  return all.some((c) => same(c) && c.runtime.managed) && !all.some((c) => same(c) && !c.runtime.managed);
+}
 
 // Plan agents (ADR 0003): AI Meter describes them with a clean environment, a sign-in check and the plan's billing.
 const PLAN_AGENTS = ["claude", "codex"];
@@ -73,6 +97,44 @@ function planDispatch(args) {
     sign_in_check: args.runtime === "claude"
       ? { program: process.execPath, arguments: [agent, "signin", "claude", signIn], json_field: "authMethod", expect: "claude.ai" }
       : { program: process.execPath, arguments: [agent, "signin", "codex", signIn], text: "Logged in using ChatGPT" },
+  };
+}
+
+/**
+ * A managed copy of Pi (ADR 0004, ADR 0005), on Windows or inside WSL as the describe names it, with its configuration
+ * folder in managed_config (scenario.pi_config, else FAKE_PI_CONFIG, an empty folder the tests make; omitted with
+ * scenario.no_managed_config). Its environment policy is no_credentials, or scenario.managed_policy when the scenario
+ * has one (null for none). The fake agent gets the shell as an extra argument and names it in its answer.
+ *   - The Windows copy runs commands through PowerShell (modify) or none (read_only), and for modify has a git_bash
+ *     alternative, offered as AI Meter offers it only while the copy is bound to Git Bash: scenario.git_bash false
+ *     withholds it, as when AI Meter found no Git for Windows.
+ *   - The copy inside WSL runs bash (modify) or none, with no alternatives. Started from Windows, its variables travel in
+ *     its arguments (wsl.exe -e env NAME=value ...), here as NAME=value arguments the fake agent applies, and its
+ *     environment is empty; started from WSL, they are in its environment.
+ */
+function managedDispatch(args) {
+  const behaviour = (scenario.behaviour || {})[args.runtime] || "ok";
+  const modify = args.mode === "modify";
+  const inWsl = args.where === "wsl";
+  const bound = scenario.git_bash !== false;
+  const policy = "managed_policy" in scenario ? scenario.managed_policy : "no_credentials";
+  const config = scenario.pi_config || process.env.FAKE_PI_CONFIG;
+  const shell = inWsl ? (modify ? "bash" : "none") : modify ? "powershell" : "none";
+  const variables = {
+    FAKE_AGENT_MODE: args.mode,
+    PI_CODING_AGENT_DIR: config,
+    PI_OFFLINE: "1",
+    ...(scenario.env_file ? { FAKE_ENV_FILE: scenario.env_file } : {}),
+  };
+  const throughArguments = inWsl && args.from === "windows";
+  return {
+    managed: true,
+    ...(policy === null ? {} : { environment_policy: policy }),
+    ...(scenario.no_managed_config ? {} : { managed_config: config }),
+    commands: shell,
+    arguments: [agent, args.runtime, behaviour, shell, ...(throughArguments ? Object.entries(variables).map(([name, value]) => name + "=" + value) : [])],
+    ...(modify && !inWsl && bound ? { alternatives: [{ shell: "git_bash", arguments: [agent, args.runtime, behaviour, "git_bash"] }] } : {}),
+    environment: throughArguments ? {} : variables,
   };
 }
 

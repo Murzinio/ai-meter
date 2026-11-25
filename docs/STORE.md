@@ -52,7 +52,9 @@ The CLI recreates the submission from the last published one, so the listing, sc
 
 ## Updates in the Store build
 
-The Store installs updates by itself, and Store policy does not allow an app to update itself any other way. The packaged app therefore never contacts GitHub for updates and never downloads anything (`UpdateCheck.Find` returns before any request when `Native.IsPackaged`, and a regression test holds it to that).
+The Store installs updates by itself, and Store policy does not allow an app to update itself any other way. The packaged app therefore never contacts GitHub for updates and never downloads an update of itself (`UpdateCheck.Find` returns before any request when `Native.IsPackaged`, and a regression test holds it to that).
+
+The packaged app makes no download at all today. The optional managed Pi ([below](#optional-download-managed-pi)) is switched off in the Store build (`OfferedInStoreBuild` is `false`) until the listing discloses it; once on, it will be the only download the packaged app can make (one of two archives, as the user chooses), which is not an update of AI Meter and happens only when the user presses its button in Settings.
 
 Instead, with **Settings → About → Check for updates** on, once a day it asks the Store, through Windows' `StoreContext.GetAppAndOptionalStorePackageUpdatesAsync`, whether an update is waiting, and if so shows *An update is waiting in the Microsoft Store* with a button that opens the Store's downloads page. This uses the Windows metadata already referenced by the MSIX build (`Windows.Services.winmd`), with no new dependency. It only answers for a copy installed from the Store; a sideloaded package reports nothing. It has not been verified on a Store install yet: check it when the next version reaches the Store.
 
@@ -65,7 +67,7 @@ Instead, with **Settings → About → Check for updates** on, once a day it ask
   > - Read the local session and usage files that Claude Code, Codex, GitHub Copilot, Cursor and other AI tools already write on the PC, and place its compact indicator inside the Windows taskbar.
   > - Run the user's installed command-line tools: `codex` and `claude` to read their own usage limits; `wsl.exe` to list running WSL distributions (`wsl.exe -l --running`, which starts nothing) and to run `claude` or `agy` inside a WSL distribution that is already running, only to renew an expired sign-in; `cmd.exe` or `wsl.exe` to open a terminal with `claude auth login` or `agy` when the user clicks *Sign in*.
   > - Use sign-ins the user already has: the OAuth access token of the Claude Code login (sent only to Anthropic's usage endpoint), the Cursor app's sign-in (sent only to Cursor), the Antigravity CLI sign-in (sent only to Google) and, when the user chooses *Sign in* for Copilot, a GitHub device-flow sign-in whose token is kept encrypted with Windows DPAPI. With the user's consent, API keys saved by OpenCode, Pi or Crush or exported in shell profiles, each sent only to its own service's usage endpoint. The Claude login and API keys are asked on the first-launch screen (API keys are off unless the user turns them on); every service can be turned off in Settings. Nothing is sent to AI Meter's authors.
-  > - When the user clicks *Connect* in Settings → AI apps, add an `ai-meter` entry to that app's MCP configuration (Claude Desktop, VS Code, Claude Code, Codex, Cursor, OpenCode, Pi or Antigravity CLI, on Windows or in WSL), keeping a backup of the previous file; *Disconnect* removes it. The entry starts a relay script that AI Meter writes to `%USERPROFILE%\.aimeter\mcp.ps1`, outside the package so that the other apps can read it; the script starts AI Meter through its execution alias when it is not running.
+  > - When the user turns an app on in Settings → MCP → Connected apps, add an `ai-meter` entry to that app's MCP configuration (Claude Desktop, VS Code, Claude Code, Codex, Cursor, OpenCode, Pi or Antigravity CLI, on Windows or in WSL), keeping a backup of the previous file; *Disconnect* removes it. The entry starts a relay script that AI Meter writes to `%USERPROFILE%\.aimeter\mcp.ps1`, outside the package so that the other apps can read it; the script starts AI Meter through its execution alias when it is not running.
   >
   > It does not install drivers or services.
 - **Start at login:** the app declares a startup task, disabled in the manifest. The first-launch screen has a *Start with Windows* switch (on by default, as in the other builds); the startup task is requested only after the user closes that screen, and only if the switch is on. The user can turn it off later in AI Meter's Settings or in Windows Settings → Apps → Startup. Someone moving over from the GitHub copy keeps its settings (both use `%APPDATA%\AIMeter`), but not its start-up, which is a shortcut the GitHub uninstaller removes. So the package shows the first-launch screen once more, with the other choices as they were, when it has never shown it itself and its startup task is still disabled (`PackageFirstRunDone`). When Windows cannot tell the task's state, nothing is recorded and the package looks again at the next launch.
@@ -78,7 +80,7 @@ Tip: publish the first submission with **Visibility → Private audience** to in
 
 The package declares one language, `en-us`, so Partner Center asks for one listing, in English (policy 10.7 requires a listing for every language a package declares). The app still follows the Windows display language, or the one chosen in Settings → General, in English, Italian, Spanish, French, German and Portuguese: its strings are compiled into the executable and do not depend on the package's languages.
 
-**Description.** Policy 10.2.4 requires the dependency to be disclosed at the start:
+**Description.** Policy 10.2.4 requires the dependency to be disclosed at the start. The listing below is the current one; the managed Pi's disclosure is not part of it yet ([below](#optional-download-managed-pi)).
 
 > AI Meter shows the usage of AI tools you already have: it needs at least one of Claude Code, Codex (ChatGPT), GitHub Copilot, Cursor, Antigravity CLI or a local model server such as Ollama or LM Studio, installed and signed in on this PC, or an API key of a supported service. It reads the data those tools save on your PC and is not affiliated with Anthropic, OpenAI, GitHub, Microsoft, Cursor or Google.
 >
@@ -90,6 +92,22 @@ The package declares one language, `en-us`, so Partner Center asks for one listi
 > • Your AI apps can ask it, through MCP, how much room your limits have.
 > • Private: no telemetry and no account; the only network requests go to each service's own usage endpoint. Open source under Apache 2.0.
 > • Six languages: English, Italian, Spanish, French, German and Portuguese.
+
+### Optional download: managed Pi
+
+From Settings › MCP › Delegation agent, the user can have the app download Pi ([ADR 0004](adr/0004-managed-pi-for-delegation.md), [docs/MCP.md](MCP.md#managed-pi)): one pinned release of a third-party open-source program (MIT) in two archives from `github.com`, each checked against a SHA-256 kept in AI Meter's sources: `pi-windows-x64.zip` (59 MB, about 131 MB unpacked) for Windows and `pi-linux-x64.tar.gz` (59 MB, about 125 MB unpacked) for the WSL distribution the app is set to, each with its own button ([ADR 0005](adr/0005-managed-pi-inside-wsl.md)). These are the only downloads there ever are: Pi itself runs with `PI_OFFLINE=1` and fetches nothing while it works. The copy on Windows would be unpacked to `%USERPROFILE%\.aimeter\managed\pi`, outside the package and outside `PATH`, because a packaged app's AppData is private to the package. The copy inside WSL is unpacked in the Linux home (`~/.aimeter/managed/pi`) by the distribution's own `tar`, which the app starts through `wsl.exe` only during an installation the user asked for, and only while the distribution already runs; the app never starts WSL. The user's keys reach each copy only for the services the user ticks.
+
+**The Store build does not offer it yet.** `OfferedInStoreBuild` in `src/ManagedPi.cs` is `false`: the build shows no download button and offers no managed copy, on Windows or inside WSL. The release workflow submits the package automatically from a stable tag, while the listing text is edited by hand in Partner Center, so the package must not reach certification ahead of its disclosure. To enable it:
+
+1. Update the listing description in Partner Center with the disclosure paragraph below, change the *Private* bullet to end "... usage endpoint and, only if you ask for it, the download of Pi.", and add certification notes saying where the button is (Settings › MCP › Delegation agent).
+2. Only in the release after that, set `OfferedInStoreBuild` to `true`.
+3. If certification refuses it, set `OfferedInStoreBuild` back to `false` and remove the disclosure paragraph from the description in the same submission. The GitHub builds are unchanged and the Store build keeps "use the agent you have".
+
+Disclosure paragraph, to add at the start of the description when the feature is enabled in the Store build (not part of the current listing):
+
+> Optional download: if you ask for it in Settings, AI Meter downloads Pi, a third-party open-source coding agent (MIT licence, about 59 MB for each of two builds, from GitHub), so that delegated tasks can run on Windows or inside WSL without installing an agent yourself. For the build inside WSL, AI Meter runs the distribution's own tar once to unpack it, while WSL is already running. Nothing is downloaded unless you press a download button, and you can remove each copy there.
+
+The clauses it is meant to satisfy are Store Policies 7.20: 10.2.2, 10.2.3, 10.2.4 and 10.1.5. That is this project's reading of the policy, not a certification result. Re-read those clauses before each submission.
 
 **Short description:** AI limits in your taskbar, and a local history of what you use, for the AI tools already on your PC.
 
@@ -126,7 +144,7 @@ The Windows SDK (`makeappx`, `makepri`) is needed only to produce `AIMeter.msix`
 1. Turn on **Developer Mode** (Windows Settings → System → For developers).
 2. `powershell -ExecutionPolicy Bypass -File build.ps1 -NoInstall -Package` (without the SDK it stops after writing `bin\msix`, with the warning *Windows SDK not found*).
 3. `Add-AppxPackage -Register bin\msix\AppxManifest.xml`, then start **AI Meter** from the Start menu.
-4. Check the first-launch screen and *Start with Windows*; Settings → AI apps → *Connect* for Claude Desktop and VS Code, with and without their configuration file (an existing file must change in the real `%APPDATA%` folder; a missing one must be explained, not created); an AI app starting AI Meter through `%LOCALAPPDATA%\Microsoft\WindowsApps\AIMeter.exe` while AI Meter is closed; Settings → About → *Open data folder*.
+4. Check the first-launch screen and *Start with Windows*; Settings → MCP → Connected apps for Claude Desktop and VS Code, with and without their configuration file (an existing file must change in the real `%APPDATA%` folder; a missing one must be explained, not created); an AI app starting AI Meter through `%LOCALAPPDATA%\Microsoft\WindowsApps\AIMeter.exe` while AI Meter is closed; Settings → About → *Open data folder*.
 5. Remove it with `Get-AppxPackage *AIMeter* | Remove-AppxPackage`.
 
 Without the `STORE_*` values the registered package has the placeholder identity, so it installs next to, not over, a copy from the Store.
@@ -141,3 +159,4 @@ Without the `STORE_*` values the registered package has the placeholder identity
 - AI apps start AI Meter through the execution alias `%LOCALAPPDATA%\Microsoft\WindowsApps\AIMeter.exe` (`Program.LaunchCommand`), which survives Store updates. The relay script is `%USERPROFILE%\.aimeter\mcp.ps1`, since other apps cannot read a package's private folders. Disconnect AI apps in Settings → AI apps before uninstalling, or their `ai-meter` entries point at a missing alias.
 - The package declares only English as its language ([Store listing](#store-listing)); the interface languages are unchanged.
 - No GitHub update check: the Store updates the package, and Settings → About only shows whether the Store has an update waiting.
+- The managed Pi, once the Store build offers it and the user installs it, lives on Windows in `%USERPROFILE%\.aimeter\managed\pi` for the same reason as the relay script (the copy inside WSL is in the Linux home, outside the package): other programs cannot read a package's private folders. Removing the app does not remove it; the *Remove* button in Settings does, together with the keys copied into it.

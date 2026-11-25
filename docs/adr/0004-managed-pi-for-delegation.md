@@ -11,7 +11,7 @@ Delegation uses a coding agent the user already has, in the place where the task
 
 Coordinator plugins that hand work from Claude Code to Codex, or the other way, ask for the other CLI to be installed. AI Meter can ask the same for subscription plans, where nothing else is possible: without an API key, a plan is reachable only through its vendor's CLI with the user's sign-in. For services reached with a key (free models and free tiers) the agent is interchangeable, and Pi already speaks to all of them.
 
-Pi is MIT-licensed and publishes a standalone build for Windows that needs no Node. A live test on 2026-11-19 with Pi 1.5.2 (`pi-windows-x64.zip`, 59.1 MB, 191 MB unpacked), driven by a local stand-in for the model, found that it:
+Pi is MIT-licensed and publishes a standalone build for Windows that needs no Node. A live test on 2026-11-19 with Pi 1.5.2 (`pi-windows-x64.zip`, 59.1 MB, 131 MB unpacked), driven by a local stand-in for the model, found that it:
 - accepts the arguments of `agents/pi.json` and the task on stdin, and emits the same JSON events as in WSL;
 - keeps to its own configuration folder with `PI_CODING_AGENT_DIR`, without creating `~/.pi`;
 - reads, writes and edits files without any bash, where only commands fail; its PowerShell tool works with Windows PowerShell 5.1;
@@ -28,7 +28,7 @@ A request to a real model from the Windows build was not part of that test.
    - The managed Pi is an optional addition for services reached with a key. It is never used for a subscription plan.
    - In each place, a verified agent of the user's wins. The managed copy is a separate runtime that `list_candidates` offers only where no verified Pi of the user's is found, unless the user chooses otherwise in Settings. Both are named in the answer, so the choice is visible.
 2. **Installed only by an explicit action in Settings.**
-   - Settings › AI apps › Delegated tasks offers the download and its removal. No MCP read and no task installs, updates or removes anything (ADR 0001 decision 4 stands for those).
+   - Settings › MCP › Delegation agent offers the download and its removal. No MCP read and no task installs, updates or removes anything (ADR 0001 decision 4 stands for those).
    - AI Meter downloads one pinned Pi release from the project's official releases and checks it against a SHA-256 kept in AI Meter's own sources. A different file is discarded.
    - A newer Pi is adopted only by a new AI Meter version, after its dispatch is verified: Pi does not promise a stable event format.
    - The copy lives in AI Meter's data folder, outside `PATH`, and nothing else on the PC is changed.
@@ -36,6 +36,7 @@ A request to a real model from the Windows build was not part of that test.
    - The managed copy runs with its own configuration folder and never reads or writes the user's `~/.pi`.
    - For each service the user ticks, AI Meter writes that service's key into the managed copy's own key file. This is the later decision that ADR 0001 decision 3 asked for: a stored key reaches a runtime, but only this one, only for the services chosen, and it can be withdrawn.
    - No MCP tool returns a key, and the plugin receives none: it starts the copy with the path of its configuration folder, which is not a secret. A candidate still needs a runtime that holds a key for its service.
+   - *Amended 2026-11-20:* the plugin reads the copy's key file itself, for one purpose: to remove those keys from what it returns to the coordinator, since the agent can read that file. It keeps them in memory for the task and stores or sends none. AI Meter still hands the plugin no key.
    - The key file is plain text, as in any Pi installation, where AI Meter's own store is encrypted for the Windows user. Settings says so beside the choice.
 4. **Windows folders only, in this phase.**
    - The managed copy serves tasks whose folder is on Windows. A folder in WSL keeps using the agents installed there.
@@ -43,10 +44,12 @@ A request to a real model from the Windows build was not part of that test.
 5. **A fixed shell, and tasks that say what they can do.**
    - The plugin starts the managed copy with a shell it has chosen, never with one Pi finds: Git Bash when installed, otherwise the PowerShell tool. WSL's `bash.exe` is never used.
    - The dispatch description states whether commands can be run. A read-only task needs no shell.
+   - *Amended 2026-11-20:* AI Meter binds the shell in the copy's own settings (Pi's `shellPath`, set to the Git Bash it finds and, once written, replaced but never removed, so that a missing Git Bash fails closed), and the plugin uses the `git_bash` alternative only when `describe_dispatch` offers it, because Pi resolves its shell each time it runs a command.
 6. **The plugin still runs the agent** (ADR 0002 decision 1). AI Meter describes the dispatch and keeps the leases; it starts no task.
 7. **Store and privacy.**
    - The Store listing discloses the optional download at the start of its description, and the download happens only on the user's request (Store Policies 7.20: 10.2.2, 10.2.3, 10.2.4, 10.1.5).
    - If certification refuses it, the managed copy stays in the GitHub builds, and the Store build keeps "use the agent you have".
+   - *Amended 2026-11-20:* the Store build ships with the copy turned off until the listing discloses it (docs/STORE.md has the procedure).
    - The README's list of network destinations gains GitHub's release hosts, for this download only. The sentence that the Store version never contacts GitHub changes accordingly.
 
 ## Consequences
@@ -54,7 +57,8 @@ A request to a real model from the Windows build was not part of that test.
 - A Windows user with a key and no agent can delegate after one action in Settings.
 - AI Meter takes on a third-party program's versions: each adopted Pi release needs its dispatch verified, and a security fix in Pi reaches users only with an AI Meter release.
 - A key the user chose now also lies in a plain-text file under AI Meter's data folder.
-- 59 MB are downloaded and 191 MB kept, only for those who ask.
+- 59 MB are downloaded and 131 MB kept, only for those who ask.
+- Pi's tools are not confined to the task's folder: like any coding agent run as the user (the user's own Pi and its `~/.pi` included), the copy can read the user's files, including its own plain-text key file, so a model that is told to, or tricked into it, can see the keys copied there, all of them and not only that of the service the task runs on. The plugin removes keys from the answers it returns, but the model's service has then already received it. Copy only keys of services whose free-tier exposure you accept, and do not delegate tasks on content you do not trust.
 - Tasks that must run commands still depend on Git Bash or PowerShell, and stopping a task can leave a child process until #37 is done.
 - Users with only Windows and a subscription plan gain nothing: Claude Code and Codex on Windows are still unverified.
 

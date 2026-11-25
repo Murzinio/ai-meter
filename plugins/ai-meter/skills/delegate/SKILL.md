@@ -5,7 +5,7 @@ description: Hand a self-contained coding task (reading and summarising code, fi
 
 # Delegate a task to a free model with AI Meter
 
-The `ai-meter-delegate` tools run a task with a coding agent already set up on this PC (Pi or OpenCode), on a free model whose pool has room according to AI Meter, or, when the user agrees, with Codex or Claude Code on one of the user's subscription plans (see *Subscription plans* below). You stay the coordinator: you write the task, check the answer and decide what to keep.
+The `ai-meter-delegate` tools run a task with a coding agent already set up on this PC (Pi or OpenCode, or AI Meter's managed Pi), on a free model whose pool has room according to AI Meter, or, when the user agrees, with Codex or Claude Code on one of the user's subscription plans (see *Subscription plans* below). You stay the coordinator: you write the task, check the answer and decide what to keep.
 
 ## When to delegate
 
@@ -34,7 +34,7 @@ The task, and every file the agent reads, go to the provider of the chosen model
    - `task`: complete instructions. Name the files, say what to look for and the shape of the answer. The agent sees nothing else;
    - `workspace`: the absolute path of the repository root (the server may not run in it); it must be in a Git repository;
    - `mode`: `read_only` (default), or `modify` for a task that changes files;
-   - optionally `model`, `runtime`, `where`, `min_context`, `timeout_seconds`;
+   - optionally `model`, `runtime`, `where`, `managed`, `min_context`, `timeout_seconds`;
    - `wait_seconds` up to 50, so that short tasks answer in the same call.
 3. **Follow it.** While `status` is `queued`, `starting` or `running`, call `delegate_result` with `wait_seconds: 50`. `delegate_status` lists recent jobs; `delegate_cancel` stops one, with the processes it started, and releases its lease. `timeout_seconds` covers the whole job, choosing the candidate included. At most four jobs run at once: a fifth is refused until one ends.
 4. **Check the answer before using it.** `answer` is only the agent's own claim. A wrong but confident answer is common on small free models.
@@ -48,9 +48,23 @@ The task, and every file the agent reads, go to the provider of the chosen model
 ## When it does not start
 
 - `error` with `excluded` and `runtimes`: no free model fits, or no agent has a key of its own. Explain the reasons. `runtimes.unsupported` lists agents that are installed but cannot be used (such as Gemini CLI, or Codex and Claude Code on Windows), each with a `detail` sentence you can show. Never install an agent or handle a key: the user sets agents up.
+- `next_step` (in the report, or in `delegate_candidates` when it finds no candidate): one sentence saying what the user can do in AI Meter's Settings so that a task can run, such as having AI Meter set up its copy of Pi, ticking a service's key for it, or starting WSL; or, after Cloudflare refused a task's token, adding the Workers AI permission to that token in Cloudflare's dashboard (the key in AI Meter is right, so do not send the user to AI Meter's Settings for it); or, after Cloudflare refused a model it keeps for its paid plan, choosing another model. Relay it to the user as it is; do not try to do it yourself.
+- An `error` that ends with the agent's exit code and the start of its error output, such as "No API key found for openrouter.": the agent could not start the task. Show that line to the user; the fix is theirs.
 - `skipped`: candidates that were tried and why, such as AI Meter's own error for that agent, an agent and place it has not verified, an agent in another WSL distribution, a key only exported in a WSL shell profile when the plugin runs on Windows, or a pool with no room.
 - `excluded` with `agent_lists_price`: the service lists the model as free, but the agent's own list prices it, so the agent would pay for the first request before the plugin could stop it.
 - AI Meter must be installed on Windows; its relay starts it when needed.
+
+## AI Meter's managed Pi
+
+A copy of Pi that AI Meter keeps for users with a key and no agent, inside WSL (`where: "wsl"`, with its `distro`) or on Windows (`where: "windows"`), each installed on its own. It exists only if the user installed it in AI Meter's Settings › MCP › Delegation agent and ticked there the services whose keys it may use; neither you nor the plugin can install it or give it a key. `runtimes.managed` lists each copy (installed, reachable, the services it holds a key for), and its candidates have `managed: true`.
+- Never for a subscription plan, and after the user's own agents. When both copies are installed, the user's preference in Settings says which comes first; pin one with `where` only when the task needs it. `managed: true` pins the managed copies; `managed: false` keeps to the user's own agents.
+- The copy inside WSL runs `modify` commands through Linux's `bash`. It works on repositories in WSL and on Windows folders; on a Windows folder, Git commands inside its working copy do not find the repository and Windows-only toolchains do not run: for such a project pin `where: "windows"`. From WSL, only the copy in your own distribution can be used.
+- The Windows copy works on Windows folders only: a repository inside WSL (`\\wsl.localhost\...`, `\\wsl$\...`, however the path is written) skips it, with the reason in `skipped`. Its `modify` tasks run commands through Git Bash when AI Meter has bound the copy to Git for Windows, otherwise through PowerShell, never through WSL's `bash.exe`.
+- `candidate.shell` says which shell ran the commands. It is known only when the task starts, so in a task for a managed copy say what to run ("run the tests") rather than shell command lines.
+- It starts without variables that hold credentials or service addresses (API keys, tokens, passwords, base URLs, endpoints); everything else, `PATH` included, stays. Do not rely on such variables in a task for it.
+- Its `grep` and `find` tools need ripgrep and fd on `PATH` (Pi downloads nothing while it works); without them they fail with an error.
+- `warnings` containing `managed_key_redacted`: the agent output one of the copy's keys (in its answer, a commit, a file name...), and the plugin removed it everywhere in the report. The model and its provider still saw it: tell the user, and never ask the managed Pi to read its own configuration.
+- `managed_key_check_failed`: the key file could not be checked after the agent ended (unreadable, or its keys changed more than once or were still being changed), so its answer, activity and changes are withheld (`error` says why). The worktree is still there: tell the user, and review it yourself only with their agreement.
 
 ## Best effort: only with the user's agreement
 
@@ -74,7 +88,7 @@ The user's other plan can take a task too: from Claude Code, **Codex on the Chat
 
 - They are never candidates unless asked for: `excluded` reports them as `plan_not_requested`. `delegate_candidates` with `include_plan: true` lists them, with `billing: "included_in_plan"` and the plan's `windows` (room left, the user's reserve, the reset).
 - **Before using one, ask the user.** Say which plan and window the task would draw on and how much room is left above their reserve. Then call `delegate` with `allow_plan: true`. Free models are still tried first, unless the plan's room is about to be lost at a reset.
-- `plan_off_in_settings`: the user has not turned the plan on in AI Meter's Settings › AI apps › Delegated tasks. Tell them; do not work around it.
+- `plan_off_in_settings`: the user has not turned the plan on in AI Meter's Settings › MCP › Subscription plans. Tell them; do not work around it.
 - `plan_reserve` (with `until`): a window is at or below what the user keeps for themselves. `plan_extra_usage_on`: Claude's extra usage is on and would bill past the plan. `plan_credits_on`: Codex would spend credits past the plan. `plan_usage_unknown` or `plan_sign_in_not_confirmed`: AI Meter cannot see the plan's room or a plan sign-in. None of these can be worked around.
 - A candidate skipped because its sign-in check failed is signed in with an API key, or not signed in: the user signs in themselves. Never sign in or handle a credential.
 - **Tell the user where the task drew from:** `plan.window`, the room `plan.before` and `plan.after` it. The room after includes anything else the account used meanwhile.

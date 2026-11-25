@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import * as jobs from "../scripts/lib/jobs.mjs";
 import * as report from "../scripts/lib/report.mjs";
 import { Activity } from "../scripts/lib/activity.mjs";
+import { findGitBash } from "../scripts/lib/shell.mjs";
 import { looksSecret } from "../scripts/lib/workspace.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -24,6 +25,9 @@ function setUp(scenario) {
   process.env.AI_METER_RELAY = JSON.stringify([process.execPath, join(here, "fixtures", "fake-meter.mjs")]);
   process.env.FAKE_METER_SCENARIO = JSON.stringify(scenario);
   process.env.FAKE_METER_LOG = join(folder, "meter.jsonl");
+  // The managed copies' configuration folder, unless a test names its own: empty, so they hold no keys.
+  process.env.FAKE_PI_CONFIG = join(folder, "managed-pi");
+  mkdirSync(process.env.FAKE_PI_CONFIG);
   // CI's Linux runner is not WSL; the place only picks describe_dispatch's "from" and how agents are stopped.
   process.env.AI_METER_PLACE = process.platform === "win32" ? "windows" : "wsl";
   // Delegation needs a Git repository; this one is apart from the jobs folder, as a user's checkout would be.
@@ -769,6 +773,507 @@ test("a tool call that never ends is reported as unfinished", () => {
   assert.deepEqual(shown.calls, [{ tool: "bash", args: "node --test", unfinished: true }, { tool: "write", args: "x.js" }]);
   assert.deepEqual(shown.commands, [], "a command without its end has no result to report");
   assert.deepEqual(shown.files_written, ["x.js"]);
+});
+
+const managedPi = { service: "openrouter", model: "a:free", runtime: { name: "pi", where: "windows", managed: true }, pool: "openrouter:free" };
+
+test("a managed Pi candidate is described as managed, and a read-only task says nothing about shells", async () => {
+  const { workspace, calls } = setUp({ candidates: [managedPi] });
+  const job = await jobs.wait(jobs.start({ task: "x", workspace }).id, 20);
+
+  assert.equal(job.status, "completed", job.error || "");
+  assert.equal(job.warnings, undefined, "a missing auth.json gives nothing to redact");
+  assert.equal(calls().find((c) => c.tool === "describe_dispatch").arguments.managed, true);
+  assert.equal(calls().find((c) => c.tool === "claim_capacity").arguments.managed, true, "the claim names the managed copy too: AI Meter takes a call without it for the user's own Pi");
+  assert.deepEqual(job.candidate, { service: "openrouter", model: "a:free", runtime: "pi", where: "windows", managed: true, pool: "openrouter:free" });
+  assert.equal(job.shell, undefined, "a task that runs no command records no shell");
+  assert.equal(job.summary.answer, "echo via none: x", "the described arguments were used");
+  assert.equal(report.full(job, jobs.root()).candidate.shell, undefined);
+});
+
+test("managed pins the managed Pi, or the user's own agents", async () => {
+  const { workspace, calls } = setUp({ candidates: [managedPi, pi] });
+  assert.equal((await jobs.wait(jobs.start({ task: "x", workspace, managed: false }).id, 20)).candidate.managed, undefined);
+  for (const tool of ["describe_dispatch", "claim_capacity"]) assert.equal(calls().find((c) => c.tool === tool).arguments.managed, undefined, "nothing for the user's own Pi: " + tool);
+  assert.equal((await jobs.wait(jobs.start({ task: "x", workspace, managed: "true" }).id, 20)).candidate.managed, true, "as the command line passes it");
+});
+
+test("the fake meter, as AI Meter, refuses the managed copy to a call that does not say managed: true", async () => {
+  // Guards the fixture itself: without it, the assertions on managed: true above would prove nothing.
+  setUp({ candidates: [managedPi] });
+  const { withMeter } = await import("../scripts/lib/meter.mjs");
+  const ask = { service: "openrouter", model: "a:free", runtime: "pi" };
+  await assert.rejects(withMeter((meter) => meter.call("describe_dispatch", { ...ask, where: "windows", mode: "read_only", workspace: "C:\\w" })), /No usable Pi is set up here/);
+  await assert.rejects(withMeter((meter) => meter.call("claim_capacity", { ...ask, client: "test", ttl_seconds: 60 })), /No usable Pi is set up here/);
+  assert.equal((await withMeter((meter) => meter.call("claim_capacity", { ...ask, managed: true, client: "test", ttl_seconds: 60 }))).lease_id, "lease-1");
+});
+
+/** A repository with one commit, for modify tasks. */
+function committedRepository(folder) {
+  const repository = join(folder, "repo");
+  execFileSync("git", ["init", "-q", repository]);
+  writeFileSync(join(repository, "a.txt"), "a\n");
+  execFileSync("git", ["-C", repository, "add", "."]);
+  execFileSync("git", ["-C", repository, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"]);
+  return repository;
+}
+
+for (const bound of [true, false]) {
+  const shell = bound ? "git_bash" : "powershell";
+  test(`a managed modify task runs commands through ${shell} when AI Meter ${bound ? "offers" : "withholds"} the git_bash alternative`, async () => {
+    const { folder } = setUp({ candidates: [managedPi] });
+    const envFile = join(folder, "env.json");
+    process.env.FAKE_METER_SCENARIO = JSON.stringify({ candidates: [managedPi], env_file: envFile, git_bash: bound });
+    const repository = committedRepository(folder);
+
+    const job = await jobs.wait(jobs.start({ task: "x", workspace: repository, mode: "modify" }).id, 20);
+
+    assert.equal(job.status, "completed", job.error || "");
+    assert.equal(job.shell, shell, "AI Meter's offer decides, not whether this machine has Git");
+    assert.equal(job.summary.answer, "echo via " + shell + ": x", "the arguments for that shell were used");
+    assert.equal(report.full(job, jobs.root()).candidate.shell, shell, "the report says where commands ran");
+    const env = JSON.parse(readFileSync(envFile, "utf8"));
+    assert.equal(env.PI_CODING_AGENT_DIR, process.env.FAKE_PI_CONFIG);
+    const paths = Object.keys(env).filter((key) => key.toLowerCase() === "path");
+    assert.equal(paths.length, 1, "one PATH variable");
+    // Git's bin folder goes first on PATH only when the plugin finds Git for Windows too, which depends on this machine:
+    // Windows sets %ProgramFiles% for every new process, so a test cannot stand in its own (tests/shell.test.mjs covers
+    // each case with made-up files). On Linux the plugin looks for Windows paths and finds none.
+    const bin = bound && process.platform === "win32" ? findGitBash() : null;
+    if (bin) assert.equal(env[paths[0]].split(";")[0], bin, "Git's bin folder comes first");
+    else assert.equal(env[paths[0]], process.env[Object.keys(process.env).find((key) => key.toLowerCase() === "path")], "PATH is left as it was");
+  });
+}
+
+/**
+ * A job written as start() would write it, its worker then run here: start() needs the workspace to exist, and a WSL
+ * share does not exist on every machine that runs the tests.
+ */
+async function runWritten(fields) {
+  const id = "jw" + Date.now().toString(36) + Math.random().toString(16).slice(2, 6);
+  mkdirSync(join(jobs.root(), id), { recursive: true });
+  writeFileSync(join(jobs.root(), id, "task.txt"), "x");
+  writeFileSync(join(jobs.root(), id, "job.json"), JSON.stringify({
+    id, status: "queued", created_at: new Date().toISOString(), client: "test", from: "windows", mode: "read_only", timeout_seconds: 30, wanted: {},
+    allow_best_effort: false, allow_free_tier: false, allow_plan: false, coordinator: null, skipped: [], ...fields,
+  }));
+  await jobs.runJob(id);
+  return jobs.load(id);
+}
+
+const wslSkip = { service: "openrouter", model: "a:free", runtime: "pi", where: "windows", managed: true, reason: "the managed Pi works on Windows folders only; this repository is inside WSL" };
+
+test("a managed candidate is skipped for a repository inside WSL, before AI Meter is asked to describe it", async () => {
+  const { calls } = setUp({ candidates: [managedPi] });
+  const job = await runWritten({ workspace: "\\\\wsl.localhost\\Ubuntu\\home\\u\\repo" });
+
+  assert.equal(job.status, "failed");
+  assert.deepEqual(job.skipped, [wslSkip]);
+  assert.equal(calls().filter((c) => c.tool === "describe_dispatch" || c.tool === "claim_capacity").length, 0, "neither described nor claimed");
+});
+
+test("a repository start() found inside WSL skips the managed Pi however the workspace was spelt", async () => {
+  setUp({ candidates: [managedPi] });
+  const job = await runWritten({ workspace: "Z:\\repo", inside_wsl: true });
+  assert.deepEqual(job.skipped, [wslSkip]);
+});
+
+test("a repository on this machine's own disk is not marked inside WSL", () => {
+  const { workspace } = setUp({ candidates: [managedPi] });
+  assert.equal(jobs.start({ task: "x", workspace }).inside_wsl, undefined);
+});
+
+test("the managed Pi starts without the coordinator's credentials, but with PATH and its own variables", async () => {
+  const { folder, workspace } = setUp({ candidates: [managedPi] });
+  const envFile = join(folder, "env.json");
+  process.env.FAKE_METER_SCENARIO = JSON.stringify({ candidates: [managedPi], env_file: envFile });
+  const planted = { OPENROUTER_API_KEY: "sk-or-coordinator", GITHUB_TOKEN: "ghp_coordinator", MY_SERVICE_BASE_URL: "https://example.invalid", AI_METER_HARMLESS: "kept" };
+  Object.assign(process.env, planted);
+  try {
+    const job = await jobs.wait(jobs.start({ task: "x", workspace }).id, 20);
+    assert.equal(job.status, "completed", job.error || "");
+  } finally {
+    for (const name of Object.keys(planted)) delete process.env[name];
+  }
+  const env = JSON.parse(readFileSync(envFile, "utf8"));
+  for (const name of ["OPENROUTER_API_KEY", "GITHUB_TOKEN", "MY_SERVICE_BASE_URL"]) assert.equal(env[name], undefined, name + " must not reach the agent");
+  assert.equal(env.AI_METER_HARMLESS, "kept", "everything else stays");
+  assert.equal(env.PI_CODING_AGENT_DIR, process.env.FAKE_PI_CONFIG);
+  assert.equal(env.PI_OFFLINE, "1");
+  assert.ok(Object.keys(env).some((key) => key.toLowerCase() === "path"), "PATH stays");
+});
+
+for (const [policy, reason] of [["sandboxed", /does not know \(sandboxed\)/], [null, /without credentials for the managed Pi/]]) {
+  test(`a managed Pi described with ${policy === null ? "no" : "an unknown"} environment policy is skipped, never started with the full environment`, async () => {
+    const { workspace, calls } = setUp({ candidates: [managedPi], managed_policy: policy });
+    const job = await jobs.wait(jobs.start({ task: "x", workspace }).id, 20);
+
+    assert.equal(job.status, "failed");
+    assert.match(job.skipped[0].reason, reason);
+    assert.equal(calls().filter((c) => c.tool === "claim_capacity").length, 0);
+  });
+}
+
+/** A managed copy's configuration folder with two keys, as AI Meter writes auth.json. */
+function managedConfig(folder) {
+  const config = join(folder, "pi-config");
+  mkdirSync(config, { recursive: true });
+  const keys = { openrouter: "sk-or-v1-fixture-key-0123456789", groq: "gsk_fixture_key_abcdefgh" };
+  writeFileSync(join(config, "auth.json"), JSON.stringify({ openrouter: { type: "api_key", key: keys.openrouter }, groq: { type: "api_key", key: keys.groq } }));
+  return { config, keys: Object.values(keys) };
+}
+
+test("a key the managed Pi prints and quotes is removed from its answer and activity, never reaches the report, and is flagged", async () => {
+  const { folder, workspace } = setUp({ candidates: [managedPi] });
+  const { config, keys } = managedConfig(folder);
+  process.env.FAKE_METER_SCENARIO = JSON.stringify({ candidates: [managedPi], pi_config: config, behaviour: { pi: "leak" } });
+
+  const job = await jobs.wait(jobs.start({ task: "print the keys", workspace }).id, 20);
+
+  assert.equal(job.status, "completed", job.error || "");
+  assert.equal(job.summary.answer, "The keys are: [key removed by AI Meter] and [key removed by AI Meter].");
+  assert.ok(job.warnings.includes("managed_key_redacted"));
+  const saved = readFileSync(join(jobs.root(), job.id, "job.json"), "utf8");
+  const shown = JSON.stringify(report.full(await jobs.wait(job.id, 0), jobs.root()));
+  for (const key of keys) {
+    assert.ok(!saved.includes(key), "job.json never holds a key");
+    assert.ok(!shown.includes(key), "delegate_result never holds a key");
+  }
+  assert.match(shown, /managed_key_redacted/);
+  assert.match(job.summary.activity.commands[0].output_tail, /key removed by AI Meter/, "the command's output was redacted too");
+});
+
+test("a key in the managed Pi's error output is removed from the job's error", async () => {
+  const { folder, workspace } = setUp({ candidates: [managedPi] });
+  const { config, keys } = managedConfig(folder);
+  process.env.FAKE_METER_SCENARIO = JSON.stringify({ candidates: [managedPi], pi_config: config, behaviour: { pi: "leakerror" } });
+
+  const job = await jobs.wait(jobs.start({ task: "x", workspace }).id, 20);
+
+  assert.equal(job.status, "failed");
+  assert.match(job.error, /error output starts: Could not parse .*\[key removed by AI Meter\]/);
+  assert.ok(job.warnings.includes("managed_key_redacted"));
+  const saved = readFileSync(join(jobs.root(), job.id, "job.json"), "utf8");
+  for (const key of keys) assert.ok(!saved.includes(key));
+});
+
+test("a key file that exists but cannot be parsed stops the managed candidate before anything is claimed", async () => {
+  const { folder, workspace, calls } = setUp({ candidates: [managedPi] });
+  const { config } = managedConfig(folder);
+  writeFileSync(join(config, "auth.json"), '{ "openrouter": { "key": "sk-or-v1-fixture-key-0123456789"');
+  process.env.FAKE_METER_SCENARIO = JSON.stringify({ candidates: [managedPi], pi_config: config });
+
+  const job = await jobs.wait(jobs.start({ task: "x", workspace }).id, 20);
+
+  assert.equal(job.status, "failed");
+  assert.match(job.skipped[0].reason, /key file could not be read/);
+  assert.ok(!JSON.stringify(job).includes("sk-or-v1"), "the reason never quotes the file");
+  assert.equal(calls().filter((c) => c.tool === "claim_capacity").length, 0);
+});
+
+test("a key added while the agent runs is removed too: the key file is read again when it ends", async () => {
+  const { folder, workspace } = setUp({ candidates: [managedPi] });
+  const { config } = managedConfig(folder);
+  process.env.FAKE_METER_SCENARIO = JSON.stringify({ candidates: [managedPi], pi_config: config, behaviour: { pi: "rotate" } });
+
+  const job = await jobs.wait(jobs.start({ task: "x", workspace }).id, 20);
+
+  assert.equal(job.summary.answer, "The new key is [key removed by AI Meter].");
+  assert.ok(job.warnings.includes("managed_key_redacted"));
+  assert.ok(!readFileSync(join(jobs.root(), job.id, "job.json"), "utf8").includes("sk-rotated-during-the-task-42"));
+});
+
+test("when the key file cannot be read again after the agent, its answer and activity are withheld", async () => {
+  const { folder, workspace } = setUp({ candidates: [managedPi] });
+  const { config, keys } = managedConfig(folder);
+  process.env.FAKE_METER_SCENARIO = JSON.stringify({ candidates: [managedPi], pi_config: config, behaviour: { pi: "breakkeys" } });
+
+  const job = await jobs.wait(jobs.start({ task: "x", workspace }).id, 20);
+  const shown = report.full(job, jobs.root());
+
+  assert.match(shown.answer, /withheld: the managed Pi's keys could not be checked/);
+  assert.equal(shown.activity, undefined);
+  assert.match(job.error, /withheld.*key file could not be read/);
+  assert.ok(job.warnings.includes("managed_key_check_failed"));
+  assert.equal(job.released, true, "the lease is still released, with the counters");
+  const saved = readFileSync(join(jobs.root(), job.id, "job.json"), "utf8");
+  for (const key of keys) assert.ok(!saved.includes(key));
+});
+
+/** A job's saved state and its report, as text, with no answer the agent gave and none of these keys. */
+function assertWithheld(job, keys, reason) {
+  const saved = readFileSync(join(jobs.root(), job.id, "job.json"), "utf8");
+  const shown = JSON.stringify(report.full(job, jobs.root()));
+  for (const text of [saved, shown]) {
+    for (const key of keys) assert.ok(!text.includes(key), "no key");
+    assert.ok(!text.includes("The key is") && !text.includes("The passing key"), "no answer the agent gave");
+  }
+  assert.match(job.summary.answer, /withheld/);
+  assert.equal(job.summary.activity, undefined);
+  assert.match(job.error, reason);
+  assert.ok(job.warnings.includes("managed_key_check_failed"));
+}
+
+test("keys that changed more than once during the task withhold the output: a key may have come and gone unseen", async () => {
+  const { folder, workspace } = setUp({ candidates: [managedPi] });
+  const { config, keys } = managedConfig(folder);
+  writeFileSync(join(config, "keys-revision"), "4");
+  process.env.FAKE_METER_SCENARIO = JSON.stringify({ candidates: [managedPi], pi_config: config, behaviour: { pi: "flip" } });
+
+  const job = await jobs.wait(jobs.start({ task: "x", workspace }).id, 20);
+
+  assert.equal(readFileSync(join(config, "keys-revision"), "utf8"), "8", "two changes, each counted twice");
+  assertWithheld(job, [...keys, "sk-came-and-went-0123456789"], /changed more than once during the task/);
+});
+
+test("a change of the keys announced but not finished by the end of the task withholds the output", async () => {
+  const { folder, workspace } = setUp({ candidates: [managedPi] });
+  const { config, keys } = managedConfig(folder);
+  writeFileSync(join(config, "keys-revision"), "2");
+  process.env.FAKE_METER_SCENARIO = JSON.stringify({ candidates: [managedPi], pi_config: config, behaviour: { pi: "halfchange" } });
+
+  const job = await jobs.wait(jobs.start({ task: "x", workspace }).id, 20);
+
+  assert.equal(readFileSync(join(config, "keys-revision"), "utf8"), "3");
+  assertWithheld(job, [...keys, "sk-added-but-not-finished-42"], /under way or did not finish/);
+});
+
+test("before the task, an odd count is waited out: the keys are read once AI Meter has finished changing them", async () => {
+  const { folder, workspace } = setUp({ candidates: [managedPi] });
+  const { config } = managedConfig(folder);
+  writeFileSync(join(config, "keys-revision"), "5");
+  process.env.FAKE_METER_SCENARIO = JSON.stringify({ candidates: [managedPi], pi_config: config });
+  // The change ends 700 ms after the job starts; the worker needs a moment to reach the count, so it may also find it
+  // even at once: the wait itself is covered without timing by the unit test of settledRevision.
+  const finished = new Promise((resolve) => setTimeout(() => resolve(writeFileSync(join(config, "keys-revision"), "6")), 700));
+
+  const job = await jobs.wait(jobs.start({ task: "x", workspace }).id, 20);
+  await finished;
+
+  assert.equal(job.status, "completed", job.error || "");
+  assert.equal(job.warnings, undefined);
+});
+
+test("before the task, a count that stays odd skips the managed candidate", async () => {
+  const { folder, workspace, calls } = setUp({ candidates: [managedPi] });
+  const { config } = managedConfig(folder);
+  writeFileSync(join(config, "keys-revision"), "7");
+  process.env.FAKE_METER_SCENARIO = JSON.stringify({ candidates: [managedPi], pi_config: config });
+
+  const job = await jobs.wait(jobs.start({ task: "x", workspace }).id, 20);
+
+  assert.equal(job.status, "failed");
+  assert.match(job.skipped[0].reason, /still changing the managed Pi's keys/);
+  assert.equal(calls().filter((c) => c.tool === "claim_capacity").length, 0);
+});
+
+test("a key revision that is no longer a number after the task withholds the output", async () => {
+  const { folder, workspace } = setUp({ candidates: [managedPi] });
+  const { config, keys } = managedConfig(folder);
+  process.env.FAKE_METER_SCENARIO = JSON.stringify({ candidates: [managedPi], pi_config: config, behaviour: { pi: "badrevision" } });
+
+  assertWithheld(await jobs.wait(jobs.start({ task: "x", workspace }).id, 20), keys, /key revision is not a number/);
+});
+
+test("a key revision that cannot be parsed before the task stops the managed candidate", async () => {
+  const { folder, workspace, calls } = setUp({ candidates: [managedPi] });
+  const { config } = managedConfig(folder);
+  writeFileSync(join(config, "keys-revision"), "-1");
+  process.env.FAKE_METER_SCENARIO = JSON.stringify({ candidates: [managedPi], pi_config: config });
+
+  const job = await jobs.wait(jobs.start({ task: "x", workspace }).id, 20);
+  assert.match(job.skipped[0].reason, /key revision is not a number/);
+  assert.equal(calls().filter((c) => c.tool === "claim_capacity").length, 0);
+});
+
+test("after a failed key check, Git is never asked about the agent's changes, and a later failure keeps the output withheld", async () => {
+  // The agent breaks the key file and its worktree's .git file, whose path names a key: describing its changes would
+  // fail with an error quoting it, and before the fix that error path saved the answer unwithheld.
+  const { folder } = setUp({ candidates: [managedPi] });
+  const { config, keys } = managedConfig(folder);
+  process.env.FAKE_METER_SCENARIO = JSON.stringify({ candidates: [managedPi], pi_config: config, behaviour: { pi: "breakgit" } });
+  const repository = committedRepository(folder);
+
+  const job = await jobs.wait(jobs.start({ task: "x", workspace: repository, mode: "modify" }).id, 20);
+
+  assertWithheld(job, keys, /key file could not be read/);
+  assert.equal(job.worktree.withheld, true);
+  assert.equal(job.worktree.commits, undefined, "no Git details of the agent's work");
+});
+
+test("a Git failure after a passed key check is saved with the final keys removed", async () => {
+  const { folder } = setUp({ candidates: [managedPi] });
+  const { config, keys } = managedConfig(folder);
+  process.env.FAKE_METER_SCENARIO = JSON.stringify({ candidates: [managedPi], pi_config: config, behaviour: { pi: "gitfails" } });
+  const repository = committedRepository(folder);
+
+  const job = await jobs.wait(jobs.start({ task: "x", workspace: repository, mode: "modify" }).id, 20);
+
+  assert.equal(job.status, "failed");
+  assert.match(job.error, /Command failed: git/);
+  // Git on Linux names the broken folder, and with it the key; Git for Windows says "(NULL)" instead.
+  if (/no-such-git-folder/.test(job.error)) assert.match(job.error, /no-such-git-folder-\[key removed by AI Meter\]/, "Git's error, with the key removed");
+  assert.equal(job.summary.answer, "The key is [key removed by AI Meter].", "the answer attached before Git failed is saved redacted");
+  assert.ok(job.warnings.includes("managed_key_redacted"));
+  const saved = readFileSync(join(jobs.root(), job.id, "job.json"), "utf8");
+  for (const key of keys) assert.ok(!saved.includes(key));
+});
+
+test("a modify job's Git description never carries a key: commit subjects and file names are redacted", async () => {
+  const { folder } = setUp({ candidates: [managedPi] });
+  const { config, keys } = managedConfig(folder);
+  process.env.FAKE_METER_SCENARIO = JSON.stringify({ candidates: [managedPi], pi_config: config, behaviour: { pi: "leakcommit" } });
+  const repository = committedRepository(folder);
+
+  const job = await jobs.wait(jobs.start({ task: "x", workspace: repository, mode: "modify" }).id, 20);
+
+  assert.equal(job.status, "completed", job.error || "");
+  assert.equal(job.worktree.commits.length, 1);
+  assert.match(job.worktree.commits[0], /store \[key removed by AI Meter\]$/);
+  assert.deepEqual(job.worktree.files.map((f) => f.path), ["[key removed by AI Meter].txt"]);
+  assert.ok(job.warnings.includes("managed_key_redacted"));
+  const saved = readFileSync(join(jobs.root(), job.id, "job.json"), "utf8");
+  const shown = JSON.stringify(report.full(job, jobs.root()));
+  assert.ok(!saved.includes(keys[0]) && !shown.includes(keys[0]));
+});
+
+// The managed copy inside WSL (ADR 0005), in distribution Ubuntu.
+const managedWslPi = { service: "openrouter", model: "a:free", runtime: { name: "pi", where: "wsl", distro: "Ubuntu", managed: true }, pool: "openrouter:free" };
+
+/** Run fn with WSL_DISTRO_NAME set to distro (or unset), as a coordinator in that distribution would; restored after. */
+async function inDistribution(distro, fn) {
+  const before = process.env.WSL_DISTRO_NAME;
+  if (distro) process.env.WSL_DISTRO_NAME = distro;
+  else delete process.env.WSL_DISTRO_NAME;
+  try {
+    return await fn();
+  } finally {
+    if (before === undefined) delete process.env.WSL_DISTRO_NAME;
+    else process.env.WSL_DISTRO_NAME = before;
+  }
+}
+
+test("from Windows, the copy inside WSL starts with an empty environment, and its keys are read from managed_config", async () => {
+  const { folder, workspace, calls } = setUp({ candidates: [managedWslPi] });
+  process.env.AI_METER_PLACE = "windows";
+  const { config, keys } = managedConfig(folder);
+  const envFile = join(folder, "env.json");
+  process.env.FAKE_METER_SCENARIO = JSON.stringify({ candidates: [managedWslPi], pi_config: config, env_file: envFile, behaviour: { pi: "leak" } });
+  process.env.GITHUB_TOKEN = "ghp_coordinator";
+  let job;
+  try {
+    job = await inDistribution(null, () => jobs.wait(jobs.start({ task: "x", workspace }).id, 20));
+  } finally {
+    delete process.env.GITHUB_TOKEN;
+  }
+
+  assert.equal(job.status, "completed", job.error || "");
+  for (const tool of ["describe_dispatch", "claim_capacity"]) assert.equal(calls().find((c) => c.tool === tool).arguments.managed, true, tool);
+  const described = calls().find((c) => c.tool === "describe_dispatch").arguments;
+  assert.deepEqual([described.where, described.distro, described.from], ["wsl", "Ubuntu", "windows"]);
+  assert.deepEqual(job.candidate, { service: "openrouter", model: "a:free", runtime: "pi", where: "wsl", distro: "Ubuntu", managed: true, pool: "openrouter:free" });
+  assert.equal(job.shell, undefined, "read_only runs no command");
+  assert.equal(job.summary.answer, "The keys are: [key removed by AI Meter] and [key removed by AI Meter].", "keys found through managed_config, not the environment");
+  const saved = readFileSync(join(jobs.root(), job.id, "job.json"), "utf8");
+  for (const key of keys) assert.ok(!saved.includes(key));
+  // What wsl.exe itself is started with: no credentials, and none of the copy's variables, which travel in its arguments.
+  const env = JSON.parse(readFileSync(envFile, "utf8"));
+  assert.equal(env.GITHUB_TOKEN, undefined);
+  assert.equal(env.PI_CODING_AGENT_DIR, undefined);
+  assert.ok(Object.keys(env).some((key) => key.toLowerCase() === "path"));
+});
+
+test("from Windows, a modify task on the copy inside WSL runs bash, and the revision rule still holds", async () => {
+  const { folder } = setUp({ candidates: [managedWslPi] });
+  process.env.AI_METER_PLACE = "windows";
+  const { config, keys } = managedConfig(folder);
+  const repository = committedRepository(folder);
+
+  process.env.FAKE_METER_SCENARIO = JSON.stringify({ candidates: [managedWslPi], pi_config: config });
+  const job = await inDistribution(null, () => jobs.wait(jobs.start({ task: "x", workspace: repository, mode: "modify" }).id, 20));
+  assert.equal(job.status, "completed", job.error || "");
+  assert.equal(job.shell, "bash");
+  assert.equal(job.summary.answer, "echo via bash: x");
+  assert.equal(report.full(job, jobs.root()).candidate.shell, "bash");
+
+  process.env.FAKE_METER_SCENARIO = JSON.stringify({ candidates: [managedWslPi], pi_config: config, behaviour: { pi: "flip" } });
+  assertWithheld(await inDistribution(null, () => jobs.wait(jobs.start({ task: "x", workspace: repository }).id, 20)), keys, /changed more than once/);
+});
+
+test("from WSL, the copy in the coordinator's distribution is used, and one in another distribution is skipped", async () => {
+  const { folder, workspace } = setUp({ candidates: [managedWslPi] });
+  process.env.AI_METER_PLACE = "wsl";
+  const envFile = join(folder, "env.json");
+  process.env.FAKE_METER_SCENARIO = JSON.stringify({ candidates: [managedWslPi], env_file: envFile });
+  const job = await inDistribution("Ubuntu", () => jobs.wait(jobs.start({ task: "x", workspace }).id, 20));
+  assert.equal(job.status, "completed", job.error || "");
+  assert.equal(JSON.parse(readFileSync(envFile, "utf8")).PI_CODING_AGENT_DIR, process.env.FAKE_PI_CONFIG, "from WSL its variables are in its environment");
+
+  const other = await inDistribution("Debian", () => jobs.wait(jobs.start({ task: "x", workspace }).id, 20));
+  assert.equal(other.status, "failed");
+  assert.match(other.skipped[0].reason, /in WSL distribution Ubuntu, and this plugin runs in Debian/);
+});
+
+test("for a repository inside WSL, the Windows copy is skipped and the copy inside WSL is used", async () => {
+  const { workspace, calls } = setUp({ candidates: [managedPi, managedWslPi] });
+  const job = await inDistribution(null, () => runWritten({ workspace, inside_wsl: true }));
+
+  assert.equal(job.status, "completed", job.error || "");
+  assert.deepEqual(job.skipped, [wslSkip]);
+  assert.equal(job.candidate.where, "wsl");
+  assert.deepEqual(calls().filter((c) => c.tool === "describe_dispatch").map((c) => c.arguments.where), ["wsl"], "the Windows copy is never described");
+});
+
+test("a managed copy described without managed_config is skipped: its keys could not be found", async () => {
+  const { workspace, calls } = setUp({ candidates: [managedWslPi], no_managed_config: true });
+  process.env.AI_METER_PLACE = "windows";
+  const job = await inDistribution(null, () => jobs.wait(jobs.start({ task: "x", workspace }).id, 20));
+
+  assert.equal(job.status, "failed");
+  assert.match(job.skipped[0].reason, /did not name the managed Pi's configuration folder \(managed_config\)/);
+  assert.equal(calls().filter((c) => c.tool === "claim_capacity").length, 0);
+});
+
+test("with no candidate, the job's report and delegate_candidates carry the user's next step", async () => {
+  const managed_runtimes = [
+    { name: "pi", where: "wsl", distro: "Ubuntu", installed: false, reachable: true, version: "1.5.2", services: [], set_up_in: "AI Meter › Settings › MCP › Delegation agent" },
+    { name: "pi", where: "windows", installed: false, reachable: true, version: "1.5.2", services: [], set_up_in: "AI Meter › Settings › MCP › Delegation agent" },
+  ];
+  const { workspace } = setUp({ candidates: [], managed_runtimes, environment: { wsl: "running", distro: "Ubuntu", git_for_windows: false } });
+  const job = await jobs.wait(jobs.start({ task: "x", workspace }).id, 20);
+  const expected = "No coding agent is set up on this PC for delegated tasks: the user can have AI Meter set up its own copy of Pi inside WSL (Ubuntu), in AI Meter › Settings › MCP › Delegation agent.";
+
+  assert.equal(job.status, "failed");
+  assert.equal(report.full(job, jobs.root()).next_step, expected);
+  const { withMeter } = await import("../scripts/lib/meter.mjs");
+  assert.equal(report.candidates(await withMeter((meter) => meter.call("list_candidates", { tools: true }))).next_step, expected);
+});
+
+test("an agent that is not the managed copy is never redacted, whatever its answer", async () => {
+  const { folder, workspace } = setUp({ candidates: [pi] });
+  const { keys } = managedConfig(folder);
+  const job = await jobs.wait(jobs.start({ task: keys[0], workspace }).id, 20);
+
+  assert.equal(job.summary.answer, "echo: " + keys[0], "only the managed copy's keys are looked for");
+  assert.equal(job.warnings, undefined);
+});
+
+test("an agent that exits without explaining itself in its events gets its exit code and the start of its error output in the error", async () => {
+  const { workspace } = setUp({ candidates: [pi], behaviour: { pi: "nokey" } });
+  const job = await jobs.wait(jobs.start({ task: "x", workspace }).id, 20);
+
+  assert.equal(job.status, "failed");
+  assert.equal(job.exit_code, 1);
+  assert.equal(job.error, 'Pi exited before agent_settled. The agent exited with code 1; its error output starts: Warning: Model "x" not found for provider "openrouter". ' +
+    "Using custom model id. No API key found for openrouter. Use /login to log into a provider via OAuth or API key. See: docs/providers.md");
+  assert.equal(job.summary.error, job.error);
+});
+
+test("Pi's powershell tool calls are commands, as its bash ones are", () => {
+  const activity = new Activity("j1");
+  activity.begin("a", "powershell", { command: "Get-ChildItem *.json" });
+  activity.end("a", { failed: true, output: "No such file\n\nCommand exited with code 1" });
+  assert.deepEqual(activity.report().commands, [{ command: "Get-ChildItem *.json", ok: false, exit_code: 1, output_tail: "No such file\n\nCommand exited with code 1" }]);
 });
 
 test("activity keeps 50 file paths, and counts the others", () => {

@@ -104,7 +104,7 @@ function Invoke-Csc([string]$out, [string[]]$extra = @()) {
     $refs = @(
         "$fw\WPF\PresentationCore.dll", "$fw\WPF\PresentationFramework.dll", "$fw\WPF\WindowsBase.dll",
         "$fw\System.Xaml.dll", "$fw\System.Web.Extensions.dll", "$fw\System.Windows.Forms.dll",
-        "$fw\System.Drawing.dll", "$fw\System.Core.dll", "$fw\System.Security.dll", "$fw\System.dll"
+        "$fw\System.Drawing.dll", "$fw\System.Core.dll", "$fw\System.Security.dll", "$fw\System.IO.Compression.dll", "$fw\System.IO.Compression.FileSystem.dll", "$fw\System.dll"
     ) | ForEach-Object { "/r:$_" }
     # The app icon and the official logos bundled for built-in services whose app may be missing.
     $res = @('app.ico', 'antigravity.png', 'openai.png', 'openai-dark.png', 'copilot.png', 'copilot-dark.png' | ForEach-Object { "/resource:$(Join-Path $root "assets\$_"),$_" })
@@ -112,6 +112,8 @@ function Invoke-Csc([string]$out, [string[]]$extra = @()) {
     $res += @(Get-ChildItem (Join-Path $root 'providers\*') -Include *.json, *.png | ForEach-Object { "/resource:$($_.FullName),providers.$($_.Name)" })
     # Coding agent definitions, likewise (read from the agents folder when running from source).
     $res += @(Get-ChildItem (Join-Path $root 'agents\*.json') | ForEach-Object { "/resource:$($_.FullName),agents.$($_.Name)" })
+    # Pi's own model lists for the release the managed copy is pinned to (agents\pi-models; see src\ManagedPi.cs).
+    $res += @(Get-ChildItem (Join-Path $root 'agents\pi-models\*.json') | ForEach-Object { "/resource:$($_.FullName),pimodels.$($_.Name)" })
     $src = Get-ChildItem (Join-Path $root 'src') -Filter *.cs | ForEach-Object { $_.FullName }
     & "$fw\csc.exe" /nologo /target:winexe /optimize+ /platform:anycpu /langversion:5 `
         "/out:$out" "/win32icon:$(Join-Path $root 'assets\app.ico')" "/win32manifest:$(Join-Path $bin 'app.manifest')" `

@@ -87,6 +87,16 @@ namespace AIMeter
         // a window not listed keeps Candidates.DefaultReserveFiveHours or DefaultReserveWeek.
         public System.Collections.Generic.Dictionary<string, bool> DelegationPlans { get; set; }
         public System.Collections.Generic.Dictionary<string, int> DelegationReserves { get; set; }
+        // The managed Pi (ADR 0004): the services whose key the user chose to copy into its key file, by service id;
+        // and whether it is offered also where the user has a Pi of their own that delegation can run.
+        public System.Collections.Generic.List<string> ManagedPiServices { get; set; }
+        // Services that were ticked when the user removed their key in AI Meter: the tick comes back with a key
+        // entered again (ManagedPi.RestoreWithKey), and is forgotten once the user sets the switch themselves.
+        public System.Collections.Generic.List<string> ManagedPiServicesAwaitingKey { get; set; }
+        public bool ManagedPiBesideOwn { get; set; }
+        // Between the copy inside WSL and the copy on Windows (ADR 0005), which comes first for the same model:
+        // "windows", or "wsl" when null, empty or anything else (Candidates.PreferredManagedPlace).
+        public string ManagedPiPrefer { get; set; }
 
         /// <summary>The plans the user allowed delegated tasks to draw on.</summary>
         internal System.Collections.Generic.List<string> PlansAllowed()
@@ -138,6 +148,8 @@ namespace AIMeter
             DelegationModels = new System.Collections.Generic.Dictionary<string, string>();
             DelegationPlans = new System.Collections.Generic.Dictionary<string, bool>();
             DelegationReserves = new System.Collections.Generic.Dictionary<string, int>();
+            ManagedPiServices = new System.Collections.Generic.List<string>();
+            ManagedPiServicesAwaitingKey = new System.Collections.Generic.List<string>();
             HiddenRows = new System.Collections.Generic.Dictionary<string, bool>();
             TipsUnused = true; TipsShort = false; TipsWait = true; FindKeys = true;
             HistoryEnabled = true;
@@ -176,6 +188,31 @@ namespace AIMeter
 #endif
 
         /// <summary>
+        /// The folder for files that programs outside AI Meter must read or start: the relay script and the managed Pi.
+        /// A packaged app's AppData is private to the package, so the Store build keeps them in the user's profile.
+        /// </summary>
+        public static string SharedFolder { get { return Native.IsPackaged ? Path.Combine(Probe.Home, ".aimeter") : Folder; } }
+
+        /// <summary>
+        /// The folder for files that other programs must read or start and that must stay on this PC: the managed Pi,
+        /// whose key file is plain text. Folder is in the roaming part of the profile, which a domain account can copy
+        /// to a server and to other PCs; this one is in the local part. The Store build uses the user's profile, as
+        /// for SharedFolder.
+        /// </summary>
+        public static string LocalSharedFolder
+        {
+            get
+            {
+                if (Native.IsPackaged) return Path.Combine(Probe.Home, ".aimeter");
+#if AIMETER_TEST
+                return Folder;
+#else
+                return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AIMeter");
+#endif
+            }
+        }
+
+        /// <summary>
         /// The data folder as File Explorer can show it. In the Store build, files that AI Meter creates in AppData land
         /// in the package's private copy of AppData (write virtualisation): AI Meter sees them in Folder, Explorer only
         /// there. Files that existed before, from another build of AI Meter, stay in Folder and are changed in place.
@@ -211,6 +248,7 @@ namespace AIMeter
             keepFileUntouched = false;
             if (!File.Exists(FilePath)) return new Settings();
             string text = ReadWithRetries(FilePath);
+            NoteFileTime();
             if (text == null)
             {
                 keepFileUntouched = true;
@@ -236,6 +274,8 @@ namespace AIMeter
             if (s.DelegationModels == null) s.DelegationModels = new System.Collections.Generic.Dictionary<string, string>();
             if (s.DelegationPlans == null) s.DelegationPlans = new System.Collections.Generic.Dictionary<string, bool>();
             if (s.DelegationReserves == null) s.DelegationReserves = new System.Collections.Generic.Dictionary<string, int>();
+            if (s.ManagedPiServices == null) s.ManagedPiServices = new System.Collections.Generic.List<string>();
+            if (s.ManagedPiServicesAwaitingKey == null) s.ManagedPiServicesAwaitingKey = new System.Collections.Generic.List<string>();
             if (s.Budgets == null) s.Budgets = new System.Collections.Generic.Dictionary<string, string>();
             if (s.HiddenRows == null) s.HiddenRows = new System.Collections.Generic.Dictionary<string, bool>();
             return s;
@@ -266,10 +306,13 @@ namespace AIMeter
             catch (UnauthorizedAccessException ex) { Program.LogError("settings", ex); }
         }
 
-        /// <summary>Write the settings through a temporary file. Failures are logged; the session keeps its settings in memory.</summary>
-        public void Save()
+        /// <summary>
+        /// Write the settings through a temporary file. Failures are logged; the session keeps its settings in memory.
+        /// Returns false when the file was not written, for the callers that must tell the user.
+        /// </summary>
+        public bool Save()
         {
-            if (keepFileUntouched) return;
+            if (keepFileUntouched) return false;
             try
             {
                 Directory.CreateDirectory(Folder);
@@ -277,9 +320,46 @@ namespace AIMeter
                 File.WriteAllText(tmp, Json.Serialize(this), new UTF8Encoding(false));
                 if (File.Exists(FilePath)) File.Replace(tmp, FilePath, null);
                 else File.Move(tmp, FilePath);
+                NoteFileTime();
+                return true;
             }
             catch (IOException ex) { Program.LogError("settings-save", ex); }
             catch (UnauthorizedAccessException ex) { Program.LogError("settings-save", ex); }
+            return false;
+        }
+
+        /// <summary>When this process last read or wrote settings.json, as the file's own time; see ManagedPiServicesSavedElsewhere.</summary>
+        private static DateTime fileWrittenAt;
+
+        private static void NoteFileTime()
+        {
+            try { fileWrittenAt = File.GetLastWriteTimeUtc(FilePath); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+
+        /// <summary>
+        /// The managed Pi's ticked services as another AI Meter of the same user saved them since this one last read
+        /// or wrote settings.json; null when no one else wrote the file, or it cannot be read. Two sessions of one
+        /// Windows account can each run AI Meter, and both keep the same key file in step: without this, the one that
+        /// did not see a key withdrawn would copy it back from the choices it still has in memory. A save of this
+        /// process that failed leaves the file's time as it was, so its own stale file is never taken for a change
+        /// made elsewhere.
+        /// </summary>
+        internal static System.Collections.Generic.List<string> ManagedPiServicesSavedElsewhere()
+        {
+            try
+            {
+                if (keepFileUntouched || !File.Exists(FilePath)) return null;
+                DateTime written = File.GetLastWriteTimeUtc(FilePath);
+                if (written == fileWrittenAt) return null;
+                var stored = Json.Parse(File.ReadAllText(FilePath, Encoding.UTF8));
+                if (stored == null) return null;
+                fileWrittenAt = written;
+                return new System.Collections.Generic.List<string>(ServiceDefinition.Strings(stored, "ManagedPiServices"));
+            }
+            catch (IOException) { return null; }
+            catch (UnauthorizedAccessException) { return null; }
         }
 
         /// <summary>Windows' default WSL distribution, unless it is Docker Desktop's; "" without one.</summary>

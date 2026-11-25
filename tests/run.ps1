@@ -8,7 +8,7 @@ $parameters.CompilerOptions = '/langversion:5 /define:AIMETER_TEST'
 @(
     "$fw\WPF\PresentationCore.dll", "$fw\WPF\PresentationFramework.dll", "$fw\WPF\WindowsBase.dll",
     "$fw\System.Xaml.dll", "$fw\System.Web.Extensions.dll", "$fw\System.Windows.Forms.dll",
-    "$fw\System.Drawing.dll", "$fw\System.Core.dll", "$fw\System.Security.dll", "$fw\System.dll"
+    "$fw\System.Drawing.dll", "$fw\System.Core.dll", "$fw\System.Security.dll", "$fw\System.IO.Compression.dll", "$fw\System.IO.Compression.FileSystem.dll", "$fw\System.dll"
 ) | ForEach-Object { [void]$parameters.ReferencedAssemblies.Add($_) }
 $source = @(Get-ChildItem (Join-Path $root 'src\*.cs') | ForEach-Object { $_.FullName })
 $source += @(Get-ChildItem (Join-Path $PSScriptRoot '*.cs') | ForEach-Object { $_.FullName })
@@ -18,6 +18,12 @@ New-Item -ItemType Directory $resources | Out-Null
 try {
     Get-ChildItem (Join-Path $root 'agents/*.json') | ForEach-Object {
         $copy = Join-Path $resources "agents.$($_.Name)"
+        Copy-Item -LiteralPath $_.FullName $copy
+        [void]$parameters.EmbeddedResources.Add($copy)
+    }
+    # Pi's own model lists for the managed copy, likewise.
+    Get-ChildItem (Join-Path $root 'agents/pi-models/*.json') | ForEach-Object {
+        $copy = Join-Path $resources "pimodels.$($_.Name)"
         Copy-Item -LiteralPath $_.FullName $copy
         [void]$parameters.EmbeddedResources.Add($copy)
     }

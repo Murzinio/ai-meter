@@ -21,8 +21,24 @@
 //   tools     uses tools before answering, as in a live run: a command that fails, a write, an edit that fails (OpenCode)
 //             and a command that succeeds with long output, each with absolute paths in its folder;
 //   manytools (Pi) makes 45 tool calls before answering;
-//   retried   (Pi) meets a 429, retries as Pi does, then answers normally.
-// Requests are otherwise priced at zero, as the agents do for free models.
+//   retried   (Pi) meets a 429, retries as Pi does, then answers normally;
+//   nokey     (Pi) exits with 1 after its session event, the reason on stderr, as Pi does without a key;
+//   leak      (Pi) prints auth.json in PI_CODING_AGENT_DIR with a command and quotes every key in its answer, as a
+//             model told to could;
+//   leakerror (Pi) writes auth.json's contents to stderr and exits with 1 before agent_settled;
+//   leakcommit (Pi) writes a file named after the first key and commits it with the key in the subject, then answers;
+//   rotate    (Pi) adds a new key to auth.json while it runs, as a user could in AI Meter, and quotes it;
+//   breakkeys (Pi) quotes the first key, then leaves auth.json unreadable as JSON;
+//   flip      (Pi) adds a key and withdraws it again, each change counted in keys-revision as AI Meter does, and
+//             quotes it: a key that came and went between the plugin's two readings;
+//   halfchange (Pi) adds a key and quotes it, announcing the change in keys-revision but never finishing it;
+//   badrevision (Pi) quotes the first key and leaves keys-revision without a number;
+//   breakgit  (Pi) like breakkeys, and also breaks its worktree's .git file, so that Git cannot describe it and its
+//             error would name the key;
+//   gitfails  (Pi) breaks its worktree's .git file in the same way, leaving the keys readable.
+// Every change to auth.json is counted in keys-revision as AI Meter counts it: odd before the file is touched, even after.
+// Requests are otherwise priced at zero, as the agents do for free models. A third argument (the managed Pi's shell)
+// is named in Pi's answer: "echo via <shell>: <task>".
 //
 // Claude Code and Codex on a plan replay the events recorded live (claude-plan.jsonl, codex-plan.jsonl), with {folder}
 // standing for their folder; FAKE_ENV_FILE, when set, receives the agent's environment as JSON. Behaviours:
@@ -33,11 +49,18 @@
 // fake-agent.mjs signin <claude|codex> <plan|apikey> answers a sign-in check as the agent's status command does.
 
 import { execFileSync, spawn } from "node:child_process";
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const [runtime, behaviour, signIn] = process.argv.slice(2);
+const [runtime, behaviour, signIn, ...assignments] = process.argv.slice(2);
+// NAME=value arguments after the shell stand for the variables wsl.exe -e env passes to the managed copy inside WSL.
+// FAKE_ENV_FILE receives the environment the agent was started with, before these: what wsl.exe itself would get.
+const started = { ...process.env };
+for (const assignment of assignments) {
+  const at = assignment.indexOf("=");
+  if (at > 0) process.env[assignment.slice(0, at)] = assignment.slice(at + 1);
+}
 const emit = (event) => process.stdout.write(JSON.stringify(event) + "\n");
 // File contents an agent writes, which the report must never carry, and a command's long output.
 const SECRET_CONTENT = "contents-the-report-must-not-carry";
@@ -50,7 +73,7 @@ if (runtime === "signin") {
   else process.stderr.write(signIn === "plan" ? "Logged in using ChatGPT\n" : "Logged in using an API key - sk-proj-***test\n");
   process.exit(0);
 }
-if (process.env.FAKE_ENV_FILE) writeFileSync(process.env.FAKE_ENV_FILE, JSON.stringify(process.env));
+if (process.env.FAKE_ENV_FILE) writeFileSync(process.env.FAKE_ENV_FILE, JSON.stringify(started));
 
 let task = "";
 process.stdin.setEncoding("utf8");
@@ -108,9 +131,77 @@ function pi() {
   }
   if (behaviour === "longline") process.stdout.write("x".repeat(5 * 1024 * 1024) + "\n");
   emit({ type: "session", id: "s1", cwd: process.cwd() });
+  if (behaviour === "nokey") {
+    // What Pi 1.5.2 writes on Windows: a warning first when the model is not in its list, pointers to its documentation last.
+    process.stderr.write('Warning: Model "x" not found for provider "openrouter". Using custom model id.\nNo API key found for openrouter.\n\nUse /login to log into a provider via OAuth or API key. See:\n  docs/providers.md\n');
+    process.exitCode = 1;
+    return;
+  }
+  const authFile = join(process.env.PI_CODING_AGENT_DIR || ".", "auth.json");
+  if (behaviour === "leakerror") {
+    process.stderr.write("Could not parse " + readFileSync(authFile, "utf8") + "\n");
+    process.exitCode = 1;
+    return;
+  }
   emit({ type: "agent_start" });
   emit({ type: "turn_start" });
   if (behaviour === "tools") piTools();
+  let answer = behaviour === "list" ? listFolder() : (signIn ? "echo via " + signIn + ": " : "echo: ") + task;
+  if (behaviour === "leak") {
+    const auth = readFileSync(authFile, "utf8");
+    piTool("bash", { command: "cat " + authFile }, auth, false);
+    answer = "The keys are: " + Object.values(JSON.parse(auth)).map((entry) => entry.key).join(" and ") + ".";
+  }
+  if (["leakcommit", "rotate", "breakkeys", "flip", "halfchange", "badrevision", "breakgit", "gitfails"].includes(behaviour)) {
+    const auth = JSON.parse(readFileSync(authFile, "utf8"));
+    const first = Object.values(auth)[0].key;
+    const revisionFile = join(process.env.PI_CODING_AGENT_DIR, "keys-revision");
+    // As AI Meter changes the keys: the count goes to odd first, then the file changes, then the count goes to even.
+    const count = () => (existsSync(revisionFile) ? Number(readFileSync(revisionFile, "utf8")) : 0);
+    const changeKeys = (contents, finish = true) => {
+      writeFileSync(revisionFile, String(count() + 1));
+      writeFileSync(authFile, contents);
+      if (finish) writeFileSync(revisionFile, String(count() + 1));
+    };
+    answer = "done";
+    if (behaviour === "halfchange") {
+      const added = "sk-added-but-not-finished-42";
+      changeKeys(JSON.stringify({ ...auth, added: { type: "api_key", key: added } }), false);
+      answer = "The added key is " + added + ".";
+    }
+    if (behaviour === "flip") {
+      const passing = "sk-came-and-went-0123456789";
+      changeKeys(JSON.stringify({ ...auth, passing: { type: "api_key", key: passing } }));
+      changeKeys(JSON.stringify(auth));
+      answer = "The passing key was " + passing + ".";
+    }
+    if (behaviour === "badrevision") {
+      writeFileSync(revisionFile, "seven");
+      answer = "The key is " + first + ".";
+    }
+    if (behaviour === "breakgit" || behaviour === "gitfails") {
+      if (behaviour === "breakgit") changeKeys("{ broken");
+      // Git's error then names this folder, and with it the key. Git for Windows makes .git hidden, which Windows does
+      // not let a program overwrite, so it is removed first.
+      rmSync(".git", { force: true });
+      writeFileSync(".git","gitdir: " + join(process.cwd(), "no-such-git-folder-" + first));
+      answer = "The key is " + first + ".";
+    }
+    if (behaviour === "leakcommit") {
+      writeFileSync(first + ".txt", "x\n");
+      execFileSync("git", ["add", "."]);
+      execFileSync("git", ["-c", "user.email=agent@test", "-c", "user.name=agent", "commit", "-qm", "store " + first]);
+    }
+    if (behaviour === "rotate") {
+      const rotated = "sk-rotated-during-the-task-42";
+      changeKeys(JSON.stringify({ ...auth, fresh: { type: "api_key", key: rotated } }));
+      answer = "The new key is " + rotated + ".";
+    }
+    if (behaviour === "breakkeys") {
+      changeKeys("{ broken");
+      answer = "The key is " + first + ".";
+    }
+  }
   if (behaviour === "manytools") for (let i = 0; i < 45; i++) piTool("bash", { command: "echo " + i }, "" + i, false);
   if (behaviour === "retried") {
     const body = '429: {"message":"Provider returned error","code":429,"metadata":{"raw":"a:free is temporarily rate-limited upstream. Please retry shortly.","is_byok":false}}';
@@ -126,7 +217,7 @@ function pi() {
     type: "message_end",
     message: {
       role: "assistant",
-      content: failed ? [] : [{ type: "text", text: behaviour === "list" ? listFolder() : "echo: " + task }],
+      content: failed ? [] : [{ type: "text", text: answer }],
       stopReason: failed ? "error" : behaviour === "length" ? "length" : "stop",
       errorMessage: behaviour === "byok" ? byok : failed ? "429 Too Many Requests: free-models-per-min" : undefined,
       usage: { input: 100, output: 7, cacheRead: 20, cacheWrite: 0, totalTokens: 127, cost: { total: cost } },

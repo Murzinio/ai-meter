@@ -35,15 +35,25 @@ namespace AIMeter
             if (from != "windows" && from != "wsl") return plan.Refuse("from must be windows or wsl");
             var kind = Agents.Get(access.Runtime);
             if (kind == null) return plan.Refuse("unknown runtime " + access.Runtime);
-            var place = kind.PlaceFor(access.Where);
+            // A copy AI Meter keeps has a dispatch entry of its own per place, verified apart from the user's installation.
+            plan.Managed = access.Managed;
+            var place = kind.PlaceFor(access.Managed ? (access.Where == "wsl" ? ManagedPi.PlaceInWsl : ManagedPi.Place) : access.Where);
             if (place == null)
-                return plan.Refuse(access.Runtime + " has not been verified " + (access.Where == "wsl" ? "in WSL" : "on Windows") + " yet");
+                return plan.Refuse(access.Managed ? access.Runtime + " has no managed copy " + (access.Where == "wsl" ? "inside WSL" : "on Windows") + " in its definition"
+                    : access.Runtime + " has not been verified " + (access.Where == "wsl" ? "in WSL" : "on Windows") + " yet");
             if (from == "wsl" && access.Where == "windows") return plan.Refuse("starting a Windows agent from WSL has not been verified yet");
             if (access.Where == "wsl" && string.IsNullOrEmpty(distro)) return plan.Refuse("no WSL distribution is known");
+            if (access.Managed && access.Where == "windows" && InsideWsl(workspace))
+                return plan.Refuse("the managed copy of " + kind.Name + " on Windows works on Windows folders only; a folder inside WSL needs an agent installed there");
+            if (access.Managed && string.IsNullOrEmpty(access.ConfigFolder)) return plan.Refuse("the managed copy's configuration folder is not known");
+            // The copy's configuration folder as the plugin reads it, for the key file and its count: from Windows, the
+            // copy inside WSL is read through the distribution's file share.
+            if (access.Managed) plan.ManagedConfig = from == "windows" && access.Where == "wsl" ? access.ConfigFolderFromWindows : access.ConfigFolder;
+            if (access.Managed && string.IsNullOrEmpty(plan.ManagedConfig)) return plan.Refuse("the managed copy's configuration folder is not known from Windows");
             plan.VersionVerified = place.Verifies(version);
             string folder = string.IsNullOrEmpty(workspace) ? "{workspace}" : workspace;
             string unsafeValue = Unsafe("model", model) ?? Unsafe("provider", access.Provider) ?? Unsafe("workspace", workspace) ?? Unsafe("distribution", distro) ??
-                Unsafe("program", access.Program) ?? Unsafe("home", access.Home);
+                Unsafe("program", access.Program) ?? Unsafe("home", access.Home) ?? Unsafe("configuration folder", access.ConfigFolder);
             if (unsafeValue != null) return plan.Refuse(unsafeValue);
 
             // From Windows into WSL, wsl.exe --cd already sets the folder, given as a Windows path the agent would not
@@ -51,6 +61,7 @@ namespace AIMeter
             var values = new Dictionary<string, string>
             {
                 { "provider", access.Provider }, { "model", model }, { "workspace", access.Where == "wsl" && from == "windows" ? "." : folder },
+                { "config", access.ConfigFolder },
             };
             List<string> template;
             if (!(place.Arguments ?? kind.Dispatch.Arguments).TryGetValue(plan.Mode, out template))
@@ -59,9 +70,26 @@ namespace AIMeter
             foreach (var kv in place.Environment ?? kind.Dispatch.Environment)
                 plan.Environment[kv.Key] = kv.Value is string ? Fill((string)kv.Value, values) : Json.Serialize(FillAll(kv.Value, values));
             plan.Output = new Dictionary<string, string>(kind.Dispatch.Output);
+            foreach (var kv in place.Output) plan.Output[kv.Key] = kv.Value;
             plan.Notes.AddRange(kind.Dispatch.Notes);
+            plan.Notes.AddRange(place.Notes);
+            string commands;
+            if (place.Commands.TryGetValue(plan.Mode, out commands)) plan.Commands = commands;
+            // Argument lists for another shell, which a plugin may use instead. For a managed copy only a shell it is
+            // bound to is offered: its bash tool must never be left to search for a bash.exe (ADR 0004 decision 5).
+            // The copy inside WSL has none: bash is its own tool there.
+            foreach (var alternative in place.Alternatives.OrderBy(a => a.Key, StringComparer.Ordinal))
+            {
+                if (access.Managed && !access.Shells.Contains(alternative.Key)) continue;
+                List<string> other;
+                if (alternative.Value.TryGetValue(plan.Mode, out other)) plan.Alternatives[alternative.Key] = other.Select(a => Fill(a, values)).ToList();
+            }
             // A plan agent starts from an empty environment, so no API key or base URL can make it bill the API (ADR 0003).
-            plan.CleanEnvironment = access.Plan || kind.Dispatch.CleanEnvironment;
+            // A policy this version does not know is refused, never read as "inherit everything".
+            string unknownPolicy = new[] { kind.Dispatch.EnvironmentPolicy, place.EnvironmentPolicy }.FirstOrDefault(p => p != null && p != "clean" && p != "no_credentials");
+            if (unknownPolicy != null) return plan.Refuse(access.Runtime + "'s definition asks for an environment policy this version of AI Meter does not know: " + unknownPolicy);
+            plan.CleanEnvironment = access.Plan || kind.Dispatch.CleanEnvironment || place.EnvironmentPolicy == "clean";
+            plan.EnvironmentPolicy = plan.CleanEnvironment ? "clean" : place.EnvironmentPolicy ?? kind.Dispatch.EnvironmentPolicy;
             if (access.Plan && kind.Plan == null) return plan.Refuse(kind.Name + " has no plan in its definition");
             // The program's arguments for one run of the agent with these arguments, in a folder (inside WSL only).
             Func<string, List<string>, List<string>> wrap;
@@ -155,10 +183,26 @@ namespace AIMeter
             return null;
         }
 
-        /// <summary>A template with {provider}, {model} and {workspace} filled in one pass, so a value is never read as a placeholder.</summary>
+        /// <summary>
+        /// A template with {provider}, {model}, {workspace} and {config} filled in one pass, so a value is never read as
+        /// a placeholder. A placeholder without a value (config, for an installation of the user's) stays as written.
+        /// </summary>
         private static string Fill(string template, Dictionary<string, string> values)
         {
-            return Regex.Replace(template, @"\{(provider|model|workspace)\}", m => values[m.Groups[1].Value] ?? m.Value);
+            return Regex.Replace(template, @"\{(provider|model|workspace|config)\}", m => values[m.Groups[1].Value] ?? m.Value);
+        }
+
+        /// <summary>
+        /// Whether a Windows path leads into a WSL distribution's files: \\wsl.localhost\… or \\wsl$\…, also in their
+        /// extended form (\\?\UNC\wsl.localhost\…). A drive letter mapped to such a share is not recognised.
+        /// </summary>
+        internal static bool InsideWsl(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            string unified = path.Replace('/', '\\');
+            const string extended = @"\\?\UNC\";
+            if (unified.StartsWith(extended, StringComparison.OrdinalIgnoreCase)) unified = @"\\" + unified.Substring(extended.Length);
+            return unified.StartsWith(@"\\wsl.localhost\", StringComparison.OrdinalIgnoreCase) || unified.StartsWith(@"\\wsl$\", StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>Fill the strings of a JSON value (an environment value written as an object or array).</summary>
@@ -191,9 +235,26 @@ namespace AIMeter
             public bool Supported, VersionVerified;
             /// <summary>Start from an empty environment plus Environment, never the plugin's own (plan agents).</summary>
             public bool CleanEnvironment;
+            /// <summary>
+            /// How the plugin builds the agent's environment: "clean" (see CleanEnvironment), "no_credentials" (the
+            /// plugin's own, without the variables that hold keys, tokens or service addresses) or null (the plugin's own).
+            /// </summary>
+            public string EnvironmentPolicy;
             /// <summary>For a plan agent: the sign-in check to pass before starting it, and "included_in_plan".</summary>
             public SignInCheck SignIn;
             public string Billing;
+            /// <summary>The agent is a copy AI Meter keeps (ADR 0004, ADR 0005).</summary>
+            public bool Managed;
+            /// <summary>
+            /// For a managed copy: its configuration folder as the plugin can read it from where it runs, which holds the
+            /// key file and its count of changes (docs/MCP.md, "Managed Pi"): a Windows path for the copy on Windows; for
+            /// the copy inside WSL, the Linux path from WSL and the distribution's file share from Windows.
+            /// </summary>
+            public string ManagedConfig;
+            /// <summary>What the agent runs commands with when started with Arguments: "none", "bash" or "powershell"; null when the definition does not say.</summary>
+            public string Commands;
+            /// <summary>Argument lists for another shell, by the shell's name ("git_bash"), in place of Arguments.</summary>
+            public readonly Dictionary<string, List<string>> Alternatives = new Dictionary<string, List<string>>();
             public List<string> Arguments = new List<string>();
             public Dictionary<string, string> Environment = new Dictionary<string, string>();
             public Dictionary<string, string> Output = new Dictionary<string, string>();
