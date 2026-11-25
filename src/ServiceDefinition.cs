@@ -196,7 +196,7 @@ namespace AIMeter
     {
         private static List<ServiceDefinition> all;
         /// <summary>Ignore definitions whose ids belong to providers implemented in code.</summary>
-        private static readonly string[] Reserved = { "claude", "openai", "copilot", "antigravity", "local" };
+        private static readonly string[] Reserved = { "claude", "openai", "copilot", "antigravity", "grok", "local" };
 
         public static string UserFolder { get { return Path.Combine(Settings.Folder, "providers"); } }
 

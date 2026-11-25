@@ -298,7 +298,7 @@ namespace AIMeter
         public Collector(Settings settings)
         {
             probe = new Probe(settings);
-            providers = new List<Provider> { new ClaudeProvider(settings), new CodexProvider(settings), new CopilotProvider(settings), new AntigravityProvider(settings) };
+            providers = new List<Provider> { new ClaudeProvider(settings), new CodexProvider(settings), new CopilotProvider(settings), new AntigravityProvider(settings), new GrokProvider() };
             foreach (var d in Definitions.All) providers.Add(new DefinedProvider(d));
             providers.Add(new LocalProvider(settings));
         }

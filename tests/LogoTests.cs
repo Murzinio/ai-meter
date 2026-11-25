@@ -59,9 +59,9 @@ namespace AIMeter
             try
             {
                 foreach (bool dark in new[] { true, false })
-                    foreach (string id in new[] { "claude", "openai", "copilot", "antigravity" })
+                    foreach (string id in new[] { "claude", "openai", "copilot", "antigravity", "grok" })
                         AssertReadable(id, dark);
-                var letters = new[] { "claude", "openai", "copilot" }.Select(Ui.MonogramText).ToList();
+                var letters = new[] { "claude", "openai", "copilot", "grok" }.Select(Ui.MonogramText).ToList();
                 Assert(letters.Distinct().Count() == letters.Count, "Two built-in services share a monogram: " + string.Join(", ", letters));
             }
             finally

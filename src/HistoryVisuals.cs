@@ -108,6 +108,8 @@ namespace AIMeter
             if (id == "claude") return "Claude";
             if (id == "openai") return "ChatGPT";
             if (id == "copilot") return "GitHub Copilot";
+            if (id == "antigravity") return "Antigravity";
+            if (id == "grok") return "Grok";
             var definition = Definitions.Get(id);
             return definition == null ? id : definition.Name;
         }
