@@ -3,7 +3,7 @@
   "name": "xAI (Grok API)",
   "monogram": "xA",
   "description": "Prepaid credit balance of your xAI API team.",
-  "color": { "light": "#1A1A1A", "dark": "#E8E8E8" },
+  "color": { "light": "#1A1A1A", "dark": "#5F6672" },
   "detect": { "env": ["XAI_MANAGEMENT_API_KEY"] },
   "auth": {
     "type": "key",
@@ -17,7 +17,7 @@
       "label": "Team ID",
       "description": "The team ID shown in the xAI console (part of the console address).",
       "secret": false,
-      "pattern": "[A-Za-z0-9_-]+",
+      "pattern": "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
       "page": "https://console.x.ai",
       "pageLabel": "Open the xAI console"
     }
