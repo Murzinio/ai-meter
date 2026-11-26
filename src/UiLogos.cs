@@ -128,7 +128,7 @@ namespace AIMeter
         {
             string text = MonogramText(id);
             var b = new Border { Width = size, Height = size, CornerRadius = new CornerRadius(size * 0.24), VerticalAlignment = VerticalAlignment.Center };
-            bool hasBrand = new[] { "claude", "openai", "copilot", "antigravity" }.Contains(id) || Definitions.Get(id) != null;
+            bool hasBrand = new[] { "claude", "openai", "copilot", "antigravity", "grok" }.Contains(id) || Definitions.Get(id) != null;
             if (hasBrand) b.SetResourceReference(Border.BackgroundProperty, BrandBrush(id));
             else b.Background = Brushes.SlateGray;
             b.Child = new TextBlock
@@ -148,6 +148,7 @@ namespace AIMeter
                 case "openai": return "G";
                 case "copilot": return "GH";   // "C" and "G" already stand for Claude and ChatGPT.
                 case "antigravity": return "A";
+                case "grok": return "X";   // xAI's initial: "G" already stands for ChatGPT.
             }
             var def = Definitions.Get(id);
             if (def != null && !string.IsNullOrEmpty(def.Monogram)) return def.Monogram;
@@ -217,6 +218,6 @@ namespace AIMeter
             return null;
         }
 
-        public static string BrandBrush(string id) { return id == "openai" ? "OpenAI" : id == "copilot" ? "Copilot" : id == "claude" ? "Claude" : id == "antigravity" ? "Antigravity" : "Brand." + id; }
+        public static string BrandBrush(string id) { return id == "openai" ? "OpenAI" : id == "copilot" ? "Copilot" : id == "claude" ? "Claude" : id == "antigravity" ? "Antigravity" : id == "grok" ? "Grok" : "Brand." + id; }
     }
 }

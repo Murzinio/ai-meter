@@ -76,6 +76,7 @@ namespace AIMeter
             FreeTierTests.Register(Test);
             HermesTests.Register(Test);
             HardeningTests.Register(Test);
+            GrokTests.Register(Test);
             ManagedPiTests.Register(Test);
             Console.WriteLine("PASS: " + passed + " regression tests; isolated files and registry keys, loopback HTTP only.");
         }
@@ -559,6 +560,8 @@ namespace AIMeter
                 Assert(L.T("Spending unavailable") != "Spending unavailable", "Missing unavailable translation for " + lang);
                 Assert(L.T("{0} estimated since {1}") != "{0} estimated since {1}", "Missing estimate translation for " + lang);
                 Assert(L.T("Last updated {0}") != "Last updated {0}", "Missing cached-data translation for " + lang);
+                foreach (var key in new[] { "Weekly credits", "Sign in to the Grok CLI to see your weekly credits", "Grok CLI sign-in" })
+                    Assert(L.T(key) != key, "Missing Grok translation for " + lang + ": " + key);
                 foreach (var key in new[] { "Welcome to AI Meter", "Show in the taskbar", "Preview with sample data", "Sample data", "Leave sample data", "Showing sample data", "Free models", "free until {0}", "{0} free models", "Click a model to copy its ID for Pi, OpenCode or your scripts.", "Click to copy {0}", "Copied", "Connected apps", "Through MCP, the AI apps and coding agents you connect can read your limits, running sessions, free models and today's spending from AI Meter. Access is read-only: keys and tokens are never shared.", "Needs the pi-mcp-adapter extension: pi install npm:pi-mcp-adapter", "No supported app found", "Connect an app manually with the configuration below.", "Choose the apps that may read AI Meter's data. Restart an app after connecting it. Apps in WSL are listed while WSL is running.", "MCP configuration", "For an app that is not listed and can start a local MCP server.", "Copy configuration", "Command line", "Copy the command for your CLI, run it in PowerShell or in a WSL shell, then restart the CLI.", "Share session titles", "Titles often repeat your first request. When off, apps see only each session's agent, status, model and provider.", "{0} was not changed.", "{0} could not be read as plain JSON (it may contain comments). Add AI Meter by hand with the configuration below." })
                     Assert(L.T(key) != key, "Missing welcome translation for " + lang + ": " + key);
                 foreach (var key in new[] { "Claude Code was not found on this PC.", "AI Meter reads real-time limits through the Claude Code sign-in. If you use Claude Code only in the Claude app, open its Code tab once so that the app downloads it, or install Claude Code; then try again.", "How to install Claude Code", "Try again", "Sign in to your Claude account on the page that opens in the browser. AI Meter uses the Claude Code sign-in only to read your limits; it stays on this PC.", "Opening the sign-in page…", "Open the sign-in page", "Waiting for you to sign in in the browser…", "If the page shows a code, paste it here:", "Send", "Checking the code…", "Sign-in did not complete. Try again.",

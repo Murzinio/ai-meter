@@ -30,6 +30,7 @@ namespace AIMeter
             yield return new Service { Id = "openai", Name = "ChatGPT · Codex", Logo = Ui.Logo("openai", 28), On = S.OpenAIEnabled, Set = v => S.OpenAIEnabled = v };
             yield return new Service { Id = "copilot", Name = "GitHub Copilot", Logo = Ui.Logo("copilot", 28), On = S.CopilotEnabled, Set = v => S.CopilotEnabled = v };
             yield return new Service { Id = "antigravity", Name = "Google Antigravity", Logo = Ui.Logo("antigravity", 28), On = S.AntigravityEnabled, Set = v => S.AntigravityEnabled = v };
+            yield return new Service { Id = "grok", Name = "Grok", Logo = Ui.Logo("grok", 28), On = S.GrokEnabled, Set = v => S.GrokEnabled = v };
             foreach (var def in Definitions.All)
             {
                 var d = def;
@@ -167,6 +168,8 @@ namespace AIMeter
                     return Found(CopilotProvider.Detected()) + L.T("Premium requests and monthly quotas of your GitHub account.");
                 case "antigravity":
                     return Found(AntigravityProvider.Detected()) + L.T("5-hour and weekly quotas of your Google AI plan in Antigravity, per model group. Read with the Antigravity CLI sign-in (also in WSL). The Gemini app does not expose its limits.");
+                case "grok":
+                    return Found(GrokProvider.Detected()) + L.T("Weekly credits of your Grok subscription, as grok.com shows them, read with the Grok CLI sign-in.");
                 case "local":
                     return L.T("Models loaded by Ollama, LM Studio, llama.cpp, llama-swap and vLLM, on Windows and in WSL: video memory, context and requests in progress. Only servers on this PC are contacted.");
             }
@@ -211,6 +214,10 @@ namespace AIMeter
                     rows.Add(Row(null, L.T("Antigravity CLI sign-in"),
                         L.T("AI Meter uses the sign-in of Antigravity CLI and lets the CLI renew it: the token stays where the CLI keeps it."),
                         Button(L.T("Sign in…"), () => C.LoginAntigravity(), false)));
+                    break;
+                case "grok":
+                    rows.Add(Row(null, L.T("Grok CLI sign-in"),
+                        L.T("AI Meter uses the sign-in of the Grok CLI and lets the CLI renew it: the token stays where the CLI keeps it. When the card asks for it, sign in again in the Grok CLI."), null));
                     break;
                 case "local":
                     rows.Add(Row(null, L.T("Coding agent sessions"), L.T("OpenCode, Pi and other terminal agents: open sessions and the model each one uses, read from their local files."),
@@ -396,6 +403,7 @@ namespace AIMeter
                 case "openai": return CodexProvider.Detected();
                 case "copilot": return CopilotProvider.Detected();
                 case "antigravity": return AntigravityProvider.Detected();
+                case "grok": return GrokProvider.Detected();
             }
             var d = Definitions.Get(id);
             return d != null && d.Detected();
