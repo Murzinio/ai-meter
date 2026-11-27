@@ -231,6 +231,31 @@ namespace AIMeter
     /// </summary>
     internal enum MemoryOrigin { Unknown, Reported, Measured, Estimated }
 
+    /// <summary>
+    /// What an engine says of the inside of a loaded model (ADR 0006, decision 7): its speed, its key-value cache and,
+    /// for a mixture of experts, where the experts are. Every part is optional: what the engine does not report stays
+    /// at its unknown value and is not shown.
+    /// </summary>
+    internal sealed class ModelSegments
+    {
+        public string Engine;                // The engine's name when it is not the server the model was found on; else null.
+        public double TokensPerSecond;       // Average generation speed since the server started; zero means unknown.
+        public int KvCapacity;               // Tokens the key-value cache can hold; zero means unknown.
+        public long KvBytes;                 // An estimate of the cache's size from the model file's header; zero means unknown.
+        public int Experts, ExpertsUsed;     // Experts of a mixture of experts and how many each token uses, from the file's header; zero means unknown.
+        public string KvType;                // How the cache stores them, as the engine names it; null means unknown.
+        public string ExpertsIn;             // "device", "host" or "disk"; null when unknown or not a mixture of experts.
+        public int ExpertSlots;              // Experts kept in video memory; zero means none or unknown.
+        public double ExpertHitRatio = -1;   // Share of routed experts found in video memory since the server started; -1 means unknown.
+        public long ExpertBytesPerSecond;    // Experts moved to the card over the last interval; zero means none or unknown.
+
+        /// <summary>Changes when what the card shows of these figures changes.</summary>
+        public string Signature
+        {
+            get { return Engine + "|" + Math.Round(TokensPerSecond) + "|" + KvCapacity + KvType + ExpertsIn + ExpertSlots + "|" + (KvBytes >> 24) + "|" + Experts + "|" + Math.Round(ExpertHitRatio * 100) + "|" + (ExpertBytesPerSecond >> 24); }
+        }
+    }
+
     internal sealed class LocalModel
     {
         public string Name;
@@ -248,6 +273,14 @@ namespace AIMeter
         public int Busy, Slots;    // Active requests and available slots; zero means unknown.
         public int Port;           // Port of the process that holds the model; zero means unknown.
         public string File;        // The model file as its server names it, when known.
+        public string Build;       // The build string of a llama-server interface that is awake: it names the engine behind it.
+        public string Makes;       // "image", "audio" or "video" when the server states that is what the model gives; null for text or unknown.
+        /// <summary>
+        /// Found only by the interface every OpenAI-compatible server has, which a proxy to a cloud service has too:
+        /// it counts as a local model only while its process holds memory worth one (ADR 0006, decision 6).
+        /// </summary>
+        public bool Generic;
+        public ModelSegments Segments;   // What the engine says of the model's inside; null when it says nothing.
         public List<Session> Sessions = new List<Session>();   // CLI sessions using this model.
 
         public string Key { get { return Server + "|" + Where + "|" + Name; } }
@@ -300,7 +333,7 @@ namespace AIMeter
                 if (p.Models != null)
                     foreach (var m in p.Models)
                     {
-                        sb.Append(m.Key).Append(m.Vram >> 26).Append(m.Ram >> 26).Append(m.Swapped >> 26).Append(m.FileSize >> 26).Append(m.Context).Append(m.ContextUsed >> 10).Append(m.Busy);
+                        sb.Append(m.Key).Append(m.Vram >> 26).Append(m.Ram >> 26).Append(m.Swapped >> 26).Append(m.FileSize >> 26).Append(m.Makes).Append(m.Segments == null ? "" : m.Segments.Signature).Append(m.Context).Append(m.ContextUsed >> 10).Append(m.Busy);
                         foreach (var s in m.Sessions) sb.Append(s.Title).Append(s.Status);
                     }
             }
